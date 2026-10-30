@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>관제 대시보드 · Ntrophy Gateway</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body class="page-dash">
+
+<header class="topbar">
+  <a class="brand" href="index.html" aria-label="Ntrophy Gateway 관제">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 16h8M20 16h8" /><rect x="12" y="9" width="8" height="14" rx="2"/><circle cx="16" cy="16" r="1.6"/></svg>
+    <span class="brand-text"><b>Ntrophy Gateway</b><small>AI API 보안 게이트웨이</small></span>
+  </a>
+  <nav class="tabs" role="tablist" aria-label="화면">
+    <button role="tab" data-tab="watch" aria-selected="true">관제</button>
+    <button role="tab" data-tab="creds" aria-selected="false">인증정보·한도</button>
+    <button role="tab" data-tab="access" aria-selected="false">접근 통제</button>
+    <button role="tab" data-tab="incidents" aria-selected="false">사고 기록 <span class="tab-count" id="incCount" hidden></span></button>
+  </nav>
+  <div class="topbar-meta">
+    <span class="clock" id="clock">—</span>
+    <span class="mode-chip" id="modeChip"></span>
+    <a class="btn btn-ghost" href="scenario.html">탈취 시나리오</a>
+    <button class="btn btn-ghost" id="demoToggle" aria-expanded="false" aria-controls="demoPanel">데모 제어</button>
+  </div>
+</header>
+
+<div class="incident-banner" id="banner" hidden role="alert">
+  <div class="banner-body">
+    <strong id="bannerTitle"></strong>
+    <span id="bannerText"></span>
+  </div>
+  <button class="btn btn-on-bad" id="bannerOpen">사고 기록 보기</button>
+</div>
+
+<main class="dash">
+
+  <!-- ================= 관제 ================= -->
+  <section class="tabpanel" id="tab-watch" role="tabpanel">
+    <div class="statusband" id="statusband" data-tone="ok">
+      <div class="status-word"><span class="status-dot"></span><b id="statusWord">정상</b></div>
+      <p class="status-line" id="statusLine">게이트웨이 기록과 공급자 보고가 일치합니다</p>
+      <dl class="recon">
+        <div><dt>마지막 대조</dt><dd id="reconLast">—</dd></div>
+        <div><dt>다음 대조</dt><dd><span id="reconNext">—</span>초 후</dd></div>
+      </dl>
+    </div>
+
+    <div class="hero-grid">
+      <article class="panel diff-panel">
+        <header class="panel-head">
+          <h2>설명되지 않는 사용량</h2>
+          <p class="panel-sub">공급자가 보고한 비용 중 게이트웨이를 거치지 않은 금액 <span class="muted" id="focusCred"></span></p>
+        </header>
+        <div class="diff-figure">
+          <span class="diff-num" id="diffNum">0</span><span class="diff-unit">원</span>
+          <span class="diff-of">한도 <b id="limitNum">100,000</b>원</span>
+        </div>
+        <div id="gauge"></div>
+        <dl class="ledger">
+          <div><dt><i class="sw sw-gw"></i>게이트웨이 기록</dt><dd><span id="gwTotal">0</span>원</dd></div>
+          <div><dt><i class="sw sw-pv"></i>공급자 보고</dt><dd><span id="pvTotal">0</span>원</dd></div>
+          <div><dt>허용 오차</dt><dd><span id="tolNum">5,000</span>원</dd></div>
+        </dl>
+      </article>
+
+      <article class="panel creds-panel">
+        <header class="panel-head"><h2>인증정보</h2><p class="panel-sub">직원 호출은 PRIMARY 키로 중계됩니다</p></header>
+        <ul class="cred-list" id="credList"></ul>
+      </article>
+    </div>
+
+    <article class="panel chart-panel">
+      <header class="panel-head panel-head--row">
+        <div><h2>게이트웨이 기록과 공급자 보고</h2><p class="panel-sub">누적 비용, 3초마다 공급자 사용량을 수집해 대조</p></div>
+        <ul class="legend">
+          <li><i class="sw sw-gw"></i>게이트웨이 기록</li>
+          <li><i class="sw sw-pv"></i>공급자 보고</li>
+          <li><i class="sw sw-gap"></i>설명되지 않는 사용량</li>
+        </ul>
+      </header>
+      <div class="chart" id="chart"></div>
+    </article>
+
+    <div class="low-grid">
+      <article class="panel">
+        <header class="panel-head"><h2>서비스별 사용량</h2></header>
+        <table class="table">
+          <thead><tr><th>서비스</th><th>출발 IP</th><th class="num">호출</th><th class="num">토큰</th><th class="num">비용(원)</th></tr></thead>
+          <tbody id="svcRows"></tbody>
+        </table>
+      </article>
+      <article class="panel">
+        <header class="panel-head"><h2>최근 거부</h2><p class="panel-sub">허용 대역 밖 IP 또는 무효 토큰</p></header>
+        <ul class="deny-list" id="denyList"></ul>
+      </article>
+      <article class="panel">
+        <header class="panel-head"><h2>알림</h2></header>
+        <ol class="feed" id="feed"></ol>
+      </article>
+    </div>
+  </section>
+
+  <!-- ================= 인증정보·한도 ================= -->
+  <section class="tabpanel" id="tab-creds" role="tabpanel" hidden>
+    <div class="split">
+      <article class="panel">
+        <header class="panel-head"><h2>공급자 인증정보 등록</h2><p class="panel-sub">API 키 원문은 저장 즉시 암호화되고, 화면에는 끝 4자리만 남습니다</p></header>
+        <form class="form" id="credForm" autocomplete="off">
+          <div class="field-row">
+            <label class="field"><span>공급자</span>
+              <select name="provider"><option value="openai">OpenAI</option><option value="claude">Claude</option><option value="gemini">Gemini</option></select>
+            </label>
+            <label class="field"><span>이름</span><input name="name" placeholder="예: 운영 키" required></label>
+          </div>
+          <fieldset class="field">
+            <legend>인증 방식</legend>
+            <div class="seg" role="radiogroup">
+              <label><input type="radio" name="auth_mode" value="API_KEY" checked><span>API 키 · Vault 보관</span></label>
+              <label><input type="radio" name="auth_mode" value="WIF"><span>WIF · 단기 토큰</span></label>
+            </div>
+          </fieldset>
+          <fieldset class="field">
+            <legend>용도</legend>
+            <div class="seg" role="radiogroup">
+              <label><input type="radio" name="role" value="PRIMARY" checked><span>운영(PRIMARY)</span></label>
+              <label><input type="radio" name="role" value="STANDBY"><span>예비(STANDBY)</span></label>
+            </div>
+          </fieldset>
+          <div data-when="API_KEY">
+            <label class="field"><span>API 키</span><input name="api_key" type="password" placeholder="sk-..." spellcheck="false"></label>
+          </div>
+          <div data-when="WIF" hidden>
+            <div class="field-row">
+              <label class="field"><span>신뢰 ID</span><input name="trusted_identity" placeholder="spiffe://ntrophy/gateway"></label>
+              <label class="field"><span>Audience</span><input name="audience" placeholder="https://sts.provider/aud/..."></label>
+            </div>
+            <p class="hint">장기 키를 저장하지 않습니다. 호출할 때마다 15분짜리 토큰을 발급받고 만료 전에 갱신합니다.</p>
+          </div>
+          <div class="form-foot"><button class="btn btn-primary" type="submit">인증정보 등록</button><span class="form-msg" id="credMsg" role="status"></span></div>
+        </form>
+      </article>
+
+      <article class="panel">
+        <header class="panel-head"><h2>무단 사용 허용 손실 한도</h2><p class="panel-sub">대표가 바꾸는 값은 이것 하나입니다. 저장하면 다음 대조부터가 아니라 즉시 반영됩니다</p></header>
+        <form class="form" id="limitForm">
+          <label class="field"><span>한도(원)</span><input name="limit" type="number" min="10000" step="10000" inputmode="numeric"></label>
+          <div class="chips" id="limitPresets">
+            <button type="button" data-v="50000">50,000</button>
+            <button type="button" data-v="100000">100,000</button>
+            <button type="button" data-v="200000">200,000</button>
+          </div>
+          <ol class="limit-preview" id="limitPreview"></ol>
+          <div class="form-foot"><button class="btn btn-primary" type="submit">한도 저장</button><span class="form-msg" id="limitMsg" role="status"></span></div>
+        </form>
+      </article>
+    </div>
+
+    <article class="panel">
+      <header class="panel-head"><h2>등록된 인증정보</h2></header>
+      <table class="table">
+        <thead><tr><th>키</th><th>공급자</th><th>방식</th><th>용도</th><th>상태</th><th>보관 위치</th><th>표시값</th><th></th></tr></thead>
+        <tbody id="credRows"></tbody>
+      </table>
+    </article>
+  </section>
+
+  <!-- ================= 접근 통제 ================= -->
+  <section class="tabpanel" id="tab-access" role="tabpanel" hidden>
+    <p class="rule-line">통과 조건: 출발 IP가 허용 대역 안에 있고, 유효한 게이트웨이 토큰을 가진 호출만 공급자로 중계합니다. 대역이 하나도 없으면 모두 거부합니다.</p>
+    <div class="split">
+      <article class="panel">
+        <header class="panel-head"><h2>허용 IP 대역</h2><p class="panel-sub">사내망과 VPN 대역을 CIDR로 등록</p></header>
+        <ul class="cidr-list" id="cidrList"></ul>
+        <form class="form form-inline" id="cidrForm" autocomplete="off">
+          <label class="field"><span>CIDR</span><input name="cidr" placeholder="10.0.0.0/16" required pattern="^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$"></label>
+          <label class="field"><span>구분</span><select name="label"><option value="INTERNAL">사내</option><option value="VPN">VPN</option></select></label>
+          <button class="btn btn-primary" type="submit">대역 추가</button>
+        </form>
+      </article>
+      <article class="panel">
+        <header class="panel-head"><h2>직원 게이트웨이 토큰</h2><p class="panel-sub">직원은 공급자 키를 받지 않습니다. 원문은 발급할 때 한 번만 보입니다</p></header>
+        <table class="table">
+          <thead><tr><th>서비스</th><th>토큰</th><th>상태</th><th>마지막 사용</th><th></th></tr></thead>
+          <tbody id="tokRows"></tbody>
+        </table>
+        <form class="form form-inline" id="tokForm" autocomplete="off">
+          <label class="field"><span>직원·서비스</span><input name="service" placeholder="예: 직원 C" required></label>
+          <button class="btn btn-primary" type="submit">토큰 발급</button>
+        </form>
+        <div class="reveal" id="tokReveal" hidden>
+          <p><b>지금 복사하세요.</b> 이 토큰은 다시 볼 수 없습니다.</p>
+          <code id="tokRaw"></code>
+          <button class="btn btn-ghost" id="tokCopy" type="button">복사</button>
+        </div>
+      </article>
+    </div>
+    <article class="panel">
+      <header class="panel-head"><h2>거부 로그</h2></header>
+      <table class="table">
+        <thead><tr><th>시각</th><th>출발 IP</th><th>사유</th><th>토큰</th><th class="num">응답</th></tr></thead>
+        <tbody id="denyRows"></tbody>
+      </table>
+    </article>
+  </section>
+
+  <!-- ================= 사고 기록 ================= -->
+  <section class="tabpanel" id="tab-incidents" role="tabpanel" hidden>
+    <div class="inc-layout">
+      <article class="panel">
+        <header class="panel-head"><h2>사고</h2></header>
+        <ul class="inc-list" id="incList"></ul>
+      </article>
+      <article class="panel inc-detail" id="incDetail">
+        <div class="empty">아직 사고가 없습니다. 데모 제어에서 공격을 시작하면 탐지부터 복구까지 여기에 기록됩니다.</div>
+      </article>
+    </div>
+  </section>
+</main>
+
+<aside class="demo-panel" id="demoPanel" hidden aria-label="데모 제어">
+  <header><b>데모 제어</b><span>시뮬레이션 전용 (/demo/*)</span></header>
+  <button class="btn btn-danger" id="dAttack">공격 시작 · 유출된 K1으로 직접 호출</button>
+  <button class="btn btn-ghost" id="dStop">공격 중지</button>
+  <button class="btn btn-ghost" id="dOutside">허용 대역 밖에서 호출</button>
+  <button class="btn btn-ghost" id="dHoney">허니키로 접근</button>
+  <div class="speed" role="group" aria-label="속도">
+    <span>속도</span>
+    <button data-speed="1" aria-pressed="true">1×</button><button data-speed="2" aria-pressed="false">2×</button><button data-speed="4" aria-pressed="false">4×</button>
+  </div>
+  <button class="btn btn-ghost" id="dReset">처음으로 되돌리기</button>
+</aside>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="js/sim.js"></script>
+<script src="js/api.js"></script>
+<script src="js/ui.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { $, $$, esc, krw } = UI;
+
+  // ---------- 기동 ----------
+  API.boot({ autoTraffic: true });
+  $('#modeChip').textContent = API.isSim ? '시뮬레이션' : 'LIVE ' + API.config.BASE_URL;
+  if (!API.isSim) $('#demoToggle').textContent = '데모 제어(live)';
+
+  // ---------- 탭 ----------
+  let tab = 'watch';
+  function openTab(name) {
+    tab = name;
+    $$('.tabs [role=tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+    $$('.tabpanel').forEach((p) => (p.hidden = p.id !== 'tab-' + name));
+    refreshTab(true);
+  }
+  $$('.tabs [role=tab]').forEach((b) => b.addEventListener('click', () => openTab(b.dataset.tab)));
+  window.openTab = openTab;
+
+  // ---------- 관제 위젯 ----------
+  const gauge = UI.gauge($('#gauge'));
+  const chart = UI.chart($('#chart'), { windowSec: 120, height: 280, clockLabels: true });
+  const tDiff = UI.tween($('#diffNum'));
+  const tGw = UI.tween($('#gwTotal'));
+  const tPv = UI.tween($('#pvTotal'));
+  const toaster = UI.toaster($('#toasts'));
+  let lastEventId = 0, firstEvents = true, dash = null, series = null, blockMark = null;
+
+  async function refreshWatch() {
+    const [d, ts, denied] = await Promise.all([API.getDashboard(), API.getTimeseries({ range: '5m' }), API.getAccessDenied({ limit: 6 })]);
+    dash = d; series = ts;
+    const S = UI.STATUS[d.status];
+    const band = $('#statusband');
+    band.dataset.tone = S.tone; band.dataset.status = d.status;
+    document.body.dataset.status = d.status;
+    $('#statusWord').textContent = S.label;
+    $('#statusLine').textContent = S.line;
+    $('#reconLast').textContent = UI.time(d.recon.last_at);
+    $('#reconNext').textContent = Math.max(0, d.recon.next_in_sec).toFixed(0);
+    $('#limitNum').textContent = krw(d.limit_krw);
+    $('#tolNum').textContent = krw(d.tolerance_krw);
+    $('#focusCred').textContent = d.focus_credential ? `(${d.focus_credential})` : '';
+
+    const inc = d.last_incident;
+    const blockedView = d.status === 'BLOCKED' || d.status === 'RECOVERED';
+    tDiff.set(d.status === 'BLOCKED' && inc ? Math.max(d.diff_krw, inc.max_diff_krw || 0) : d.diff_krw);
+    gauge.set(
+      (d.status === 'BLOCKED' && inc ? Math.max(d.diff_krw, inc.max_diff_krw || 0) : d.diff_krw) / d.limit_krw,
+      d.status === 'NORMAL' || d.status === 'RECOVERED' ? 'ok' : S.tone,
+      blockedView && inc && inc.loss_krw ? inc.loss_krw / inc.limit_krw : null
+    );
+    tGw.set(d.gateway_cost_krw); tPv.set(d.provider_cost_krw);
+
+    // 인증정보 카드
+    $('#credList').innerHTML = d.credentials.map((c) => `
+      <li class="cred" data-status="${c.status}" data-role="${c.role}">
+        <span class="cred-label">${esc(c.label)}</span>
+        <span class="cred-main">
+          <b>${esc(providerName(c.provider))} ${c.auth_mode === 'WIF' ? 'WIF' : 'API 키'}</b>
+          <small>${c.auth_mode === 'WIF' ? `장기 키 없음, 단기 토큰 ${UI.time(c.sts_expires_at)} 만료` : `${esc(c.masked)} · Vault 암호화`}</small>
+        </span>
+        <span class="pill pill--${c.status === 'REVOKED' ? 'bad' : c.role === 'PRIMARY' ? 'ink' : 'line'}">${c.status === 'REVOKED' ? '폐기됨' : c.role === 'PRIMARY' ? '사용 중' : '예비'}</span>
+      </li>`).join('');
+
+    // 서비스
+    $('#svcRows').innerHTML = d.services.map((s) => `<tr><td>${esc(s.name)}</td><td class="mono">${esc(s.last_ip || '—')}</td><td class="num">${krw(s.calls)}</td><td class="num">${krw(s.tokens)}</td><td class="num">${krw(s.cost_krw)}</td></tr>`).join('')
+      || `<tr><td colspan="5" class="empty-cell">아직 호출이 없습니다</td></tr>`;
+
+    // 거부
+    $('#denyList').innerHTML = denied.map((r) => `<li><span class="code code--${r.status_code}">${r.status_code}</span><span class="mono">${esc(r.source_ip)}</span><span>${esc(r.reason_text || r.reason)}</span><time>${UI.time(r.at)}</time></li>`).join('')
+      || `<li class="empty-cell">거부된 호출이 없습니다</li>`;
+
+    // 차단선 표시
+    if (inc && inc.blocked_at && !blockMark) blockMark = { at: inc.blocked_at };
+    if (!inc) blockMark = null;
+
+    // 배너
+    const banner = $('#banner');
+    if (inc && inc.notified_at && (d.status === 'BLOCKED' || d.status === 'RECOVERED')) {
+      banner.hidden = false;
+      banner.dataset.tone = d.status === 'RECOVERED' ? 'ok' : 'bad';
+      $('#bannerTitle').textContent = d.status === 'RECOVERED' ? '복구됨' : '차단됨';
+      $('#bannerText').textContent = `손실 ${krw(inc.loss_krw)}원 / 한도 ${krw(inc.limit_krw)}원 · ${inc.revoked_label} 폐기 → ${inc.new_credential_label || '예비 키 없음'} 전환`;
+    } else banner.hidden = true;
+  }
+
+  async function refreshEvents() {
+    const evs = await API.getEvents({ since: lastEventId });
+    if (!evs.length) return;
+    lastEventId = evs[evs.length - 1].id;
+    const feed = $('#feed');
+    for (const e of evs) {
+      const li = document.createElement('li');
+      li.className = `feed-item feed-item--${e.level}`;
+      li.innerHTML = `<time>${UI.time(e.at)}</time><div><b>${esc(e.title)}</b><span>${esc(e.message)}</span></div>`;
+      feed.prepend(li);
+      if (!firstEvents && (e.toast || e.type === 'ATTACK_STOPPED' || e.type === 'RECOVERED' || e.type === 'HONEYKEY')) toaster.push(e);
+    }
+    while (feed.children.length > 30) feed.lastChild.remove();
+    firstEvents = false;
+    const incs = await API.getIncidents();
+    const c = $('#incCount'); c.hidden = !incs.length; c.textContent = incs.length;
+  }
+
+  function providerName(p) { return { openai: 'OpenAI', claude: 'Claude', gemini: 'Gemini' }[p] || p; }
+
+  // ---------- 인증정보·한도 ----------
+  const credForm = $('#credForm');
+  credForm.addEventListener('change', (e) => {
+    if (e.target.name === 'auth_mode') $$('[data-when]', credForm).forEach((el) => (el.hidden = el.dataset.when !== e.target.value));
+  });
+  credForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(credForm);
+    const input = Object.fromEntries(f.entries());
+    input.label = (input.role === 'STANDBY' ? 'S' : 'K') + (Date.now() % 90 + 10);
+    if (input.auth_mode === 'API_KEY' && !input.api_key) { $('#credMsg').textContent = 'API 키를 입력하세요'; return; }
+    try {
+      const c = await API.createCredential(input);
+      credForm.reset(); $$('[data-when]', credForm).forEach((el) => (el.hidden = el.dataset.when !== 'API_KEY'));
+      $('#credMsg').textContent = c.auth_mode === 'WIF' ? `${c.label} 등록됨. 장기 키 없이 단기 토큰으로 호출합니다` : `${c.label} 등록됨. Vault 암호화 저장 완료 (${c.masked})`;
+      refreshTab(true);
+    } catch (err) { $('#credMsg').textContent = '등록하지 못했습니다: ' + err.message; }
+  });
+  function renderLimitPreview(L) {
+    $('#limitPreview').innerHTML = [
+      ['의심', 0.1, 'warn'], ['경고 알림', 0.5, 'warn'], ['자동 차단', 0.7, 'bad'], ['한도', 1, 'ink'],
+    ].map(([n, r, t]) => `<li data-tone="${t}"><span>${n}</span><b>${krw(L * r)}원</b><small>${Math.round(r * 100)}%</small></li>`).join('');
+  }
+  const limitForm = $('#limitForm');
+  limitForm.limit.addEventListener('input', () => renderLimitPreview(Number(limitForm.limit.value) || 0));
+  $$('#limitPresets button').forEach((b) => b.addEventListener('click', () => { limitForm.limit.value = b.dataset.v; renderLimitPreview(Number(b.dataset.v)); }));
+  limitForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const v = Number(limitForm.limit.value);
+    if (!(v >= 10000)) { $('#limitMsg').textContent = '10,000원 이상으로 입력하세요'; return; }
+    await API.putSettings({ loss_limit_krw: v });
+    $('#limitMsg').textContent = `저장됨. ${krw(v * 0.5)}원에서 경고, ${krw(v * 0.7)}원에서 자동 차단`;
+  });
+
+  async function refreshCreds(first) {
+    const [creds, settings] = await Promise.all([API.getCredentials(), API.getSettings()]);
+    if (first) { limitForm.limit.value = settings.loss_limit_krw; renderLimitPreview(settings.loss_limit_krw); }
+    $('#credRows').innerHTML = creds.map((c) => `<tr data-status="${c.status}">
+      <td><b>${esc(c.label)}</b> <span class="muted">${esc(c.name || '')}</span></td>
+      <td>${providerName(c.provider)}</td>
+      <td>${c.auth_mode === 'WIF' ? 'WIF 단기 토큰' : 'API 키'}</td>
+      <td>${c.role === 'PRIMARY' ? '운영' : '예비'}</td>
+      <td><span class="pill pill--${c.status === 'REVOKED' ? 'bad' : 'ok'}">${c.status === 'REVOKED' ? '폐기됨' : '활성'}</span></td>
+      <td class="mono small">${esc(c.secret_ref || '')}</td>
+      <td>${c.auth_mode === 'WIF' ? '<span class="muted">키 없음</span>' : `<span class="mono">${esc(c.masked)}</span>`}</td>
+      <td class="num"><button class="btn btn-text" data-del-cred="${c.id}">삭제</button></td></tr>`).join('');
+  }
+  $('#credRows').addEventListener('click', async (e) => {
+    const id = e.target.dataset.delCred; if (!id) return;
+    await API.deleteCredential(id); refreshTab(true);
+  });
+
+  // ---------- 접근 통제 ----------
+  $('#cidrForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target; await API.createCidr({ cidr: f.cidr.value.trim(), label: f.label.value }); f.reset(); refreshTab(true);
+  });
+  $('#cidrList').addEventListener('click', async (e) => { const id = e.target.dataset.delCidr; if (id) { await API.deleteCidr(id); refreshTab(true); } });
+  $('#tokForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target; const t = await API.createToken({ service: f.service.value.trim() });
+    f.reset(); $('#tokRaw').textContent = t.token; $('#tokReveal').hidden = false; refreshTab(true);
+  });
+  $('#tokCopy').addEventListener('click', () => { navigator.clipboard?.writeText($('#tokRaw').textContent); $('#tokCopy').textContent = '복사됨'; });
+  $('#tokRows').addEventListener('click', async (e) => { const id = e.target.dataset.revTok; if (id) { await API.deleteToken(id); refreshTab(true); } });
+
+  async function refreshAccess() {
+    const [cidrs, toks, denied] = await Promise.all([API.getCidrs(), API.getTokens(), API.getAccessDenied({ limit: 20 })]);
+    $('#cidrList').innerHTML = cidrs.map((c) => `<li><span class="mono cidr">${esc(c.cidr)}</span><span class="pill pill--${c.label === 'VPN' ? 'line' : 'ink'}">${c.label === 'VPN' ? 'VPN' : '사내'}</span><button class="btn btn-text" data-del-cidr="${c.id}">삭제</button></li>`).join('')
+      || `<li class="empty-cell">허용 대역이 없어 모든 호출을 거부합니다</li>`;
+    $('#tokRows').innerHTML = toks.map((t) => `<tr data-status="${t.status}"><td>${esc(t.service)}</td><td class="mono">${esc(t.masked)}</td><td><span class="pill pill--${t.status === 'ACTIVE' ? 'ok' : 'bad'}">${t.status === 'ACTIVE' ? '활성' : '폐기됨'}</span></td><td>${UI.time(t.last_used_at)}</td><td class="num">${t.status === 'ACTIVE' ? `<button class="btn btn-text" data-rev-tok="${t.id}">폐기</button>` : ''}</td></tr>`).join('');
+    $('#denyRows').innerHTML = denied.map((r) => `<tr><td>${UI.time(r.at)}</td><td class="mono">${esc(r.source_ip)}</td><td>${esc(r.reason_text || r.reason)}</td><td class="mono">${esc(r.token_masked)}</td><td class="num"><span class="code code--${r.status_code}">${r.status_code}</span></td></tr>`).join('')
+      || `<tr><td colspan="5" class="empty-cell">거부된 호출이 없습니다</td></tr>`;
+  }
+
+  // ---------- 사고 ----------
+  let selInc = null;
+  $('#incList').addEventListener('click', (e) => { const li = e.target.closest('[data-inc]'); if (li) { selInc = li.dataset.inc; refreshTab(true); } });
+  $('#bannerOpen').addEventListener('click', () => openTab('incidents'));
+  const STEP_ICON = { SUSPECT: 'warn', WARNING: 'warn', BREACH: 'bad', REVOKED: 'bad', PROMOTED: 'ink', NO_STANDBY: 'bad', ROTATED: 'ink', NOTIFIED: 'ink', RECOVERED: 'ok', HONEYKEY: 'bad' };
+  async function refreshIncidents() {
+    const list = await API.getIncidents();
+    if (!selInc && list[0]) selInc = list[0].id;
+    $('#incList').innerHTML = list.map((i) => `<li data-inc="${i.id}" aria-current="${i.id === selInc}">
+      <b>${i.trigger_type === 'HONEYKEY' ? '허니키 접근' : `${esc(i.credential_label)} 무단 사용`}</b>
+      <span>${UI.time(i.detected_at)} 탐지</span>
+      <span class="pill pill--${i.status === 'RESOLVED' ? 'ok' : 'bad'}">${({ OPEN: '진행 중', REVOKED: '폐기됨', ROTATED: '전환됨', RESOLVED: '복구됨' })[i.status]}</span></li>`).join('')
+      || `<li class="empty-cell">사고 없음</li>`;
+    if (!selInc) return;
+    const i = await API.getIncident(selInc);
+    if (!i) return;
+    const sec = i.blocked_at && i.detected_at ? ((Date.parse(i.blocked_at) - Date.parse(i.detected_at)) / 1000).toFixed(1) : '—';
+    $('#incDetail').innerHTML = `
+      <header class="panel-head"><h2>${i.trigger_type === 'HONEYKEY' ? '허니키 접근 사고' : `${esc(i.credential_label)} 무단 사용 사고`}</h2>
+        <p class="panel-sub">${i.trigger_type === 'HONEYKEY' ? '게이트웨이에 심어둔 가짜 토큰이 사용됨' : '공급자 사용량과 게이트웨이 기록의 불일치로 탐지'}</p></header>
+      <div class="inc-figures">
+        <div class="inc-loss"><span>손실</span><b>${krw(i.loss_krw)}<small>원</small></b><em>한도 ${krw(i.limit_krw)}원의 ${i.limit_krw ? Math.round((i.loss_krw / i.limit_krw) * 100) : 0}%</em>
+          <div class="loss-bar"><i style="width:${Math.min(100, (i.loss_krw / i.limit_krw) * 100).toFixed(1)}%"></i><s style="left:70%"></s></div></div>
+        <dl class="inc-facts">
+          <div><dt>탐지</dt><dd>${UI.time(i.detected_at)}</dd></div>
+          <div><dt>차단</dt><dd>${UI.time(i.blocked_at)}</dd></div>
+          <div><dt>탐지에서 차단까지</dt><dd>${sec}초</dd></div>
+          <div><dt>폐기한 키</dt><dd>${esc(i.revoked_label || '—')} <span class="mono muted">${esc(i.revoked_masked || '')}</span></dd></div>
+          <div><dt>전환한 키</dt><dd>${esc(i.new_credential_label || '—')} <span class="mono muted">${esc(i.new_credential_masked || '')}</span></dd></div>
+          <div><dt>상태</dt><dd>${({ OPEN: '진행 중', REVOKED: '폐기됨', ROTATED: '전환됨', RESOLVED: '복구됨' })[i.status]}</dd></div>
+        </dl>
+      </div>
+      <h3 class="sub-h">타임라인</h3>
+      <ol class="timeline">${i.timeline.map((s) => `<li data-tone="${STEP_ICON[s.step] || 'ink'}"><time>${UI.timeMs(s.at)}</time><b>${esc(s.label)}</b><span>${esc(s.result)}</span></li>`).join('')}</ol>`;
+  }
+
+  // ---------- 데모 제어 ----------
+  const demoPanel = $('#demoPanel');
+  $('#demoToggle').addEventListener('click', () => { demoPanel.hidden = !demoPanel.hidden; $('#demoToggle').setAttribute('aria-expanded', String(!demoPanel.hidden)); });
+  const act = (fn) => async () => { try { await fn(); } catch (e) { toaster.push({ level: 'warning', title: '실행하지 못했습니다', message: e.message }); } };
+  $('#dAttack').addEventListener('click', act(() => API.demo.attackStart()));
+  $('#dStop').addEventListener('click', act(() => API.demo.attackStop()));
+  $('#dOutside').addEventListener('click', act(() => API.demo.outsideCall()));
+  $('#dHoney').addEventListener('click', act(() => API.demo.honeykey()));
+  $('#dReset').addEventListener('click', act(async () => {
+    await API.demo.reset(); lastEventId = 0; firstEvents = true; selInc = null; blockMark = null;
+    $('#feed').innerHTML = ''; $('#toasts').innerHTML = ''; refreshTab(true);
+  }));
+  $$('.speed [data-speed]').forEach((b) => b.addEventListener('click', () => {
+    API.speed = Number(b.dataset.speed);
+    $$('.speed [data-speed]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  }));
+
+  // ---------- 루프 ----------
+  let acc = 1e9;
+  const interval = API.isSim ? 0.25 : API.config.POLL_MS / 1000;
+  async function refreshTab(first) {
+    if (tab === 'watch') await refreshWatch();
+    else if (tab === 'creds') await refreshCreds(first);
+    else if (tab === 'access') await refreshAccess();
+    else if (tab === 'incidents') await refreshIncidents();
+    await refreshEvents();
+  }
+  window.__dash = { openTab, refreshTab, API };
+  UI.Loop.add(async (dt) => {
+    API.tick(dt);
+    acc += dt;
+    if (acc >= interval) { acc = 0; try { await refreshTab(false); } catch (e) { console.error(e); } }
+    tDiff.step(dt); tGw.step(dt); tPv.step(dt); gauge.step(dt); toaster.step(dt);
+    if (tab === 'watch' && series) {
+      const pts = series.points;
+      const t0 = pts.length ? pts[pts.length - 1].t : 0;
+      let mark = null;
+      if (blockMark && series.now) mark = { t: t0 - (Date.parse(series.now) - Date.parse(blockMark.at)) / 1000, label: '자동 차단' };
+      chart.draw(pts, dt, mark);
+    }
+    if (dash) $('#clock').textContent = UI.time(dash.updated_at);
+  });
+})();
+</script>
+</body>
+</html>
