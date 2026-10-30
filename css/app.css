@@ -1,4 +1,4 @@
-/* November Gateway — 디자인 토큰과 컴포넌트
+/* Ntrophy Gateway — 디자인 토큰과 컴포넌트
  * 원칙: 흰 카드 + 옅은 회색 바탕, 파랑 하나로 행동 유도, 큰 숫자 하나가 화면의 주인공.
  * 파랑 = 게이트웨이 기록, 주황 = 공급자 보고 (차트에서 다른 의미로 쓰지 않는다)
  * 상태색(초록/노랑/빨강)은 상태 표시에만 쓰고 항상 아이콘·글자와 함께 쓴다. */
@@ -186,6 +186,8 @@ svg { display: block; }
 }
 .meter[data-level="SUSPECT"] .meter-fill, .meter[data-level="WARNING"] .meter-fill { background: var(--warn); }
 .meter[data-level="BLOCKED"] .meter-fill { background: var(--bad); }
+.meter.over .meter-fill { background: repeating-linear-gradient(-45deg, var(--bad) 0 8px, var(--bad-ink) 8px 16px); }
+.meter.over::after { content: ""; position: absolute; right: -6px; top: 50%; transform: translateY(-50%); border: 6px solid transparent; border-left-color: var(--bad); }
 .meter-tick { position: absolute; top: -4px; bottom: -4px; width: 2px; border-radius: 2px; background: var(--line-strong); }
 .meter-tick.block { background: var(--bad); }
 .meter-legend { position: relative; height: 18px; font-size: 12px; color: var(--ink-3); font-weight: 600; }

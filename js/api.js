@@ -4,8 +4,10 @@
  *  live : 실제 NovemberApiGateway (게이트웨이 :8000, Mock Provider :9000)를 로컬에서 띄웠을 때
  *  auto : 게이트웨이에 접속되면 live, 안 되면 sim
  *
- *  주소창으로 바꾸기: ?mode=live&api=http://localhost:8000&mock=http://localhost:9000&key=demo-admin
- *  설정은 화면의 "연결" 버튼에서도 바꿀 수 있고 브라우저에 저장된다.
+ *  주소창으로 바꾸기
+ *    공개 서버 하나(게이트웨이·/live 같은 주소): ?server=https://hack.sio2.kr
+ *    로컬 두 포트: ?mode=live&api=http://localhost:8000&mock=http://localhost:9000
+ *  관리자 키는 주소창에 넣지 않는다. 화면의 "연결" 버튼에서 입력하면 이 브라우저에만 저장된다.
  */
 (function (global) {
   'use strict';
@@ -19,6 +21,10 @@
   const qs = new URLSearchParams(location.search);
   const cfg = { ...DEFAULTS, ...(read(STORE) || {}) };
   for (const k of Object.keys(DEFAULTS)) if (qs.get(k)) cfg[k] = qs.get(k);
+  if (qs.get('server')) { // 공개 모드 서버는 게이트웨이와 /live 가 한 주소에 있다
+    const s = qs.get('server').replace(/\/$/, '');
+    Object.assign(cfg, { mode: 'live', api: s, mock: s });
+  }
 
   let active = null; // 'live' | 'sim'
   let world = null;
@@ -35,10 +41,12 @@
         ip_not_allowed: '허용되지 않은 IP예요', invalid_token: '유효하지 않은 토큰이에요', service_suspended: '정지된 서비스예요',
         ip_blocked: '임시 차단된 IP예요', no_active_credential: '사용 가능한 키가 없어요', upstream_error: '공급자 연결에 실패했어요',
         revoked: '폐기된 키예요', rate_limited: '잠시 후 다시 시도해 주세요', invalid_admin_key: '관리자 키가 올바르지 않아요',
+        'bad admin key': '관리자 키가 올바르지 않아요',
         wif_invalid_signature: 'JWT 서명이 올바르지 않아요', wif_expired: 'JWT가 만료됐어요', wif_untrusted_identity: '신뢰 규칙에 없는 신원이에요',
         wif_audience_mismatch: 'JWT audience가 달라요', wif_malformed: 'JWT 형식이 올바르지 않아요',
       };
-      if (status === 0) return '서버에 연결할 수 없어요';
+      // 서버가 예외로 죽으면(500) CORS 헤더가 없어 브라우저에는 연결 실패처럼 보인다
+      if (status === 0) return '서버에 연결할 수 없거나 서버 내부 오류예요';
       return known[code] || (typeof code === 'string' ? code : `요청 실패 (${status})`);
     }
   }
@@ -51,11 +59,13 @@
   async function liveFetch(base, method, path, body, headers, timeoutMs) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs || 15000);
+    // 관리자 키는 관리·데모 경로에만. 청중 경로(/live/*)로는 보내지 않는다
+    const admin = /^\/(admin|demo|idp|v1)\//.test(path) ? { 'X-Admin-Key': cfg.key } : {};
     let res;
     try {
       res = await fetch(base.replace(/\/$/, '') + path, {
         method, signal: ctl.signal,
-        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': cfg.key, ...headers },
+        headers: { 'Content-Type': 'application/json', ...admin, ...headers },
         body: body == null ? undefined : JSON.stringify(body),
       });
     } catch (e) {
@@ -90,12 +100,12 @@
   function init() {
     if (initP) return initP;
     initP = (async () => {
-      if (cfg.mode === 'sim') { active = 'sim'; return active; }
-      try {
-        await liveFetch(cfg.api, 'GET', '/admin/settings', null, {}, 1800);
+      if (cfg.mode !== 'auto') { active = cfg.mode; return active; }
+      try { // 서버가 답하기만 하면(관리자 키가 틀려 401이어도) 실서버
+        await liveFetch(cfg.mock, 'GET', '/live/stats', null, {}, 1800);
         active = 'live';
       } catch (e) {
-        active = cfg.mode === 'live' ? 'live' : 'sim';
+        active = e.status ? 'live' : 'sim';
       }
       return active;
     })();
@@ -142,9 +152,11 @@
     addTrusted: (b) => post('/admin/trusted-identities', b),
     deleteTrusted: (id) => del(`/admin/trusted-identities/${id}`),
     wifSettings: () => get('/admin/wif/settings'),
+    saveWifSettings: (wif_audience) => put('/admin/wif/settings', { wif_audience }),
 
     // 사용량 (H절)
     usageSummary: (range = 'day') => get(`/admin/usage/summary?range=${range}`),
+    usageTimeseries: (range = 'day', bucket = 'hour') => get(`/admin/usage/timeseries?range=${range}&bucket=${bucket}`),
     usageForecast: (h = 1) => get(`/admin/usage/forecast?window_hours=${h}`),
     budget: () => get('/admin/usage/budget'),
     saveBudget: (v) => put('/admin/usage/budget', { monthly_budget_krw: v }),
@@ -156,6 +168,16 @@
       resetMem = { ...r, at: Date.now(), mode: active };
       if (active === 'live') write(RESET_STORE, resetMem);
       return r;
+    },
+    cleanup: (provider) => post(`/demo/cleanup-${provider}`, {}, { timeout: 60000 }),
+    // 청중·직원에게 줄 주소. 관리자 키는 절대 넣지 않는다
+    shareLink(page) {
+      const u = new URL(page, location.href);
+      if (active === 'live') {
+        if (cfg.api === cfg.mock) u.searchParams.set('server', cfg.api);
+        else { u.searchParams.set('mode', 'live'); u.searchParams.set('api', cfg.api); u.searchParams.set('mock', cfg.mock); }
+      }
+      return u.toString();
     },
     attackStart: () => post('/demo/attack/start'),
     attackStop: () => post('/demo/attack/stop'),

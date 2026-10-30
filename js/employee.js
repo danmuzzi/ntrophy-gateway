@@ -47,12 +47,44 @@
     } catch (e) {
       typing.remove();
       const reason = e.body && (e.body.error || e.body.detail);
-      add('err', `${e.status} ${esc(reason || '')} · ${esc(e.message)}`);
+      const el = add('err', `${e.status} ${esc(reason || '')} · ${esc(e.message)}`);
       code(e.status, `${e.status} ${reason || ''}`);
+      if (reason === 'ip_not_allowed' && !st.ip) offerAllowIp(el); // 공개 서버: 발표장 공인 IP가 허용 대역 밖
+      if (reason === 'invalid_token') { add('sys', '토큰이 바뀌었을 수 있어요(리셋하면 새로 발급돼요). ‘직접 입력’에 새 토큰을 넣어 보세요.'); }
     } finally {
       st.busy = false;
       document.body.dataset.state = 'active';
     }
+  }
+
+  // 거부 로그에서 방금 막힌 출발 IP를 찾아 /32로 허용한다(관리자 키가 이 브라우저에 있어야 함)
+  function offerAllowIp(el) {
+    el.insertAdjacentHTML('beforeend', '<br><button class="btn sm" style="margin-top:8px" data-allow>이 장소 IP 허용하기</button>');
+    $('[data-allow]', el).onclick = async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const den = await API.accessDenied(10);
+        const hit = den.find((d) => d.reason === 'ip_not_allowed');
+        if (!hit) throw new Error('거부 기록을 찾지 못했어요');
+        await API.addCidr({ cidr: `${hit.source_ip}${hit.source_ip.includes(':') ? '/128' : '/32'}`, label: 'VPN' });
+        add('sys', `${esc(hit.source_ip)}를 허용 대역에 추가했어요. 다시 보내 보세요.`);
+      } catch (e) {
+        toast(e.status === 401 ? '관리자 키가 필요해요. 콘솔의 연결 설정에서 입력하세요' : e.message, 'bad');
+        ev.target.disabled = false;
+      }
+    };
+  }
+
+  // 콘솔에서 리셋하면 토큰이 새로 나온다. 같은 브라우저면 자동으로 새 토큰을 쓴다
+  function syncTokens() {
+    const r = API.lastReset();
+    const next = r && r.tokens ? Object.entries(r.tokens) : [];
+    if (JSON.stringify(next) === JSON.stringify(st.tokens)) return;
+    const first = !st.tokens.length && !msgs.children.length;
+    st.tokens = next;
+    if (!st.tokens.some(([name]) => name === st.who)) st.who = st.tokens.length ? st.tokens[0][0] : null;
+    renderWho();
+    if (!first && next.length) add('sys', '콘솔에서 데모를 초기화해 새 토큰으로 바꿨어요');
   }
 
   // 지금 게이트웨이가 쓰는 공급자 키(관리자 API로 확인). 바뀌면 반짝인다.
@@ -80,12 +112,12 @@
   }
 
   function renderWho() {
-    $('#whoSeg').innerHTML = st.tokens.map(([name]) => `<button data-who="${esc(name)}" aria-pressed="${name === st.who}">${esc(name)}</button>`).join('');
-    $('#tokField').hidden = st.tokens.length > 0;
+    $('#whoSeg').innerHTML = [...st.tokens.map(([name]) => name), ''].map((name) => `<button data-who="${esc(name)}" aria-pressed="${name === (st.who || '')}">${esc(name || '직접 입력')}</button>`).join('');
+    $('#tokField').hidden = !!st.who;
     $('#who').textContent = st.who || '직접 입력';
   }
 
-  $('#whoSeg').onclick = (e) => { const b = e.target.closest('[data-who]'); if (!b) return; st.who = b.dataset.who; renderWho(); };
+  $('#whoSeg').onclick = (e) => { const b = e.target.closest('[data-who]'); if (!b) return; st.who = b.dataset.who || null; renderWho(); if (!st.who) $('#tokIn').focus(); };
   $('#ipSeg').onclick = (e) => {
     const b = e.target.closest('[data-ip]'); if (!b) return;
     st.ip = b.dataset.ip;
@@ -120,12 +152,10 @@
   (async () => {
     st.sim = (await API.init()) === 'sim';
     if (st.sim) await API.reset('mock');
-    const r = API.lastReset();
-    st.tokens = r && r.tokens ? Object.entries(r.tokens) : [];
-    st.who = st.tokens.length ? st.tokens[0][0] : null;
+    syncTokens();
     renderWho();
     add('ai', '안녕하세요! 무엇을 도와드릴까요?');
     await refreshKey();
-    setInterval(refreshKey, 2000);
+    setInterval(() => { syncTokens(); refreshKey(); }, 2000);
   })();
 })();

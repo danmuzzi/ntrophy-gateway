@@ -1,4 +1,4 @@
-# November Gateway — 웹 화면
+# Ntrophy Gateway — 웹 화면
 
 [NovemberApiGateway](https://github.com/Seokyoung-Hong/NovemberApiGateway)(AI API 키 유출을 사용량 대조로 탐지하고 자동 차단하는 게이트웨이)의 기능을 모두 버튼과 화면으로 옮긴 프론트엔드입니다.
 설치 없이 `index.html`을 브라우저로 열면 **브라우저 안 시뮬레이션**으로 전체 흐름이 그대로 움직입니다.
@@ -32,12 +32,26 @@
 | F. `/live/*` | `live.html` |
 | B. `/v1/chat/completions` | `employee.html`, 데모 제어 → 직원 정상 호출 |
 
-## 실서버 연결 (선택)
+## 실서버로 라이브 시연
 
-원본 백엔드를 로컬에서 띄우면 같은 화면이 실제 데이터로 움직입니다. 우상단 **시뮬레이션** 버튼 → **실서버**를 고르거나 주소창에 붙입니다.
+같은 화면이 원본 백엔드의 실제 데이터로 움직입니다.
 
+**테스트 서버(hack.sio2.kr, 공개 모드)**: 권장
+1. 콘솔을 `index.html?server=https://hack.sio2.kr`로 엽니다. 관리자 키 입력 창이 뜨면 담당자에게 받은 키를 넣습니다. 키는 이 브라우저에만 저장되고 링크·QR에는 들어가지 않습니다.
+2. **데모 제어 → 데모 초기화**를 누릅니다. 직원 토큰이 새로 나오고, 같은 브라우저의 직원 화면에 자동으로 채워집니다.
+3. 직원 화면이나 우리 앱이 `403 ip_not_allowed`를 받으면 **이 장소 IP 허용하기**(직원 화면) 또는 **접근 제어 → 최근 거부 기록 → 이 IP 허용**을 누릅니다. 리셋할 때마다 다시 눌러야 합니다.
+4. **데모 제어 → 청중 QR**을 프로젝터에 띄웁니다. 청중 링크는 `live.html?server=https://hack.sio2.kr`입니다.
+
+**내 컴퓨터에서 백엔드 실행**: 화면도 로컬에서 열어야 합니다. GitHub Pages(https)에서 localhost로 보내는 요청은 브라우저가 막습니다.
 ```
-index.html?mode=live&api=http://localhost:8000&mock=http://localhost:9000&key=demo-admin
+index.html?mode=live&api=http://localhost:8000&mock=http://localhost:9000
+```
+
+**우리 앱을 게이트웨이에 붙이기**: OpenAI 호환이라 SDK의 주소와 키만 바꿉니다. 콘솔이 호출을 그대로 집계합니다.
+```python
+from openai import OpenAI
+client = OpenAI(base_url="https://hack.sio2.kr/v1", api_key="nvm-...")  # 콘솔에서 발급한 직원 토큰
+client.chat.completions.create(model="mock", messages=[{"role": "user", "content": "안녕"}])
 ```
 
 ## 파일

@@ -99,6 +99,7 @@
         S.services.push({ id: sid, name, status: 'ACTIVE' });
         tokens[name] = issue(sid).token;
       }
+      seedHistory();
       const honeykeys = {};
       for (const planted of ['공개 저장소 .env.example', '사내 위키 설정 예시']) {
         const v = `nvm-honey-${rnd(24)}`;
@@ -106,6 +107,25 @@
         honeykeys[planted] = v;
       }
       return { tokens, honeykeys, note: 'trusted_identity(WIF 신뢰 규칙)도 삭제됨. WIF는 POST /demo/wif/seed 재실행' };
+    }
+
+    // 오늘 앞 시간대의 정상 사용 이력(최대 9시간). 게이트웨이·공급자 양쪽에 똑같이 남겨 차이는 0으로 시작한다.
+    // 사용량 화면의 시간대 차트와 예측이 빈 화면이 아니게 하려는 것.
+    function seedHistory() {
+      const t = now(), start = Math.max(rangeStart('day'), t - 9 * 3600), k1 = S.creds[0];
+      const models = ['gpt-4o-mini', 'gpt-4o-mini', 'gpt-4o-mini', 'claude-3-haiku'];
+      for (let h = start; h < t - 600; h += 3600) {
+        for (const svc of S.services) {
+          const n = 4 + Math.floor(Math.random() * (svc.id === 1 ? 14 : 9));
+          for (let i = 0; i < n; i++) {
+            const at = Math.min(t - 600, h + Math.random() * 3600), out = 120 + Math.floor(Math.random() * 380), inp = 30 + Math.floor(Math.random() * 200);
+            S.usage.push({ service_id: svc.id, credential_id: k1.id, model: models[Math.floor(Math.random() * models.length)], input_tokens: inp, output_tokens: out, cost_krw: (inp + out) * COST_PER_TOKEN, at });
+            (provider.reqs[k1.ref] ||= []).push([at, inp + out]);
+          }
+        }
+      }
+      S.usage.sort((a, b) => a.at - b.at);
+      provider.reqs[k1.ref] && provider.reqs[k1.ref].sort((a, b) => a[0] - b[0]);
     }
 
     function issue(sid) {
@@ -356,6 +376,19 @@
       };
     }
 
+    function usageTimeseries(range, bucket) {
+      const since = rangeStart(range);
+      const pad = (v) => String(v).padStart(2, '0');
+      const key = (at) => { const d = new Date(at * 1000); const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; return bucket === 'day' ? day : `${day}T${pad(d.getHours())}:00`; };
+      const svcs = {};
+      for (const u of S.usage.filter((x) => x.at >= since)) {
+        const s = (svcs[u.service_id] ||= { service_id: u.service_id, name: (S.services.find((x) => x.id === u.service_id) || {}).name, pts: {} });
+        const p = (s.pts[key(u.at)] ||= { t: key(u.at), calls: 0, tokens: 0, cost_krw: 0 });
+        p.calls++; p.tokens += u.input_tokens + u.output_tokens; p.cost_krw += u.cost_krw;
+      }
+      return { range, bucket, from: iso(since), to: iso(now()), services: Object.values(svcs).map((s) => ({ service_id: s.service_id, name: s.name, points: Object.values(s.pts).sort((a, b) => a.t.localeCompare(b.t)) })) };
+    }
+
     function usageForecast(windowHours = 1) {
       const t = now(), w = windowHours * 3600;
       const recent = S.usage.filter((u) => u.at >= t - w);
@@ -462,6 +495,9 @@
       if (method === 'PUT' && p === '/admin/wif/settings') { need(body.wif_audience, 400, 'empty'); S.wifAudience = body.wif_audience; return { wif_audience: S.wifAudience }; }
 
       if (method === 'GET' && p === '/admin/usage/summary') return usageSummary(qs.get('range') || 'day');
+      if (method === 'GET' && p === '/admin/usage/timeseries') return usageTimeseries(qs.get('range') || 'day', qs.get('bucket') || 'hour');
+      if (method === 'POST' && /^\/demo\/reset-(openrouter|openai)$/.test(p)) throw new HttpError(400, { detail: '시뮬레이션에서는 실제 공급자 키를 만들 수 없어요. 실서버에서 쓰는 버튼이에요.' });
+      if (method === 'POST' && /^\/demo\/cleanup-(openrouter|openai)$/.test(p)) throw new HttpError(400, { detail: '시뮬레이션에는 지울 실제 공급자 키가 없어요. 실서버에서 쓰는 버튼이에요.' });
       if (method === 'GET' && p === '/admin/usage/forecast') return usageForecast(+(qs.get('window_hours') || 1));
       if (method === 'GET' && p === '/admin/usage/budget') return { monthly_budget_krw: S.budget };
       if (method === 'PUT' && p === '/admin/usage/budget') { const b = body.monthly_budget_krw; need(b == null || (Number.isInteger(b) && b > 0), 400, 'invalid'); S.budget = b; return { monthly_budget_krw: b }; }

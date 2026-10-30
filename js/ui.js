@@ -188,6 +188,37 @@
     svg.addEventListener('pointerdown', (e) => move(e.clientX));
   }
 
+  // 세로 막대 (한 시리즈). 4px 둥근 끝, 막대 사이 간격, 막대별 툴팁
+  function barChart(host, { points, fmt = (v) => n(v), tip = () => '' }) {
+    if (!points.length) { host.innerHTML = `<div class="empty">${icon('chart')}이 기간에는 호출이 없어요</div>`; return; }
+    const W = host.clientWidth || 600, H = host.clientHeight || 200;
+    const m = { l: 36, r: 8, t: 12, b: 24 };
+    const maxV = Math.max(1, ...points.map((p) => p.v));
+    const top = (() => { const p = 10 ** Math.floor(Math.log10(maxV)); return Math.ceil(maxV / p) * p; })();
+    const slot = (W - m.l - m.r) / points.length, bw = Math.max(4, Math.min(36, slot - 6));
+    const Y = (v) => H - m.b - (H - m.t - m.b) * (v / top);
+    const every = Math.ceil(points.length / Math.max(1, Math.floor((W - m.l) / 46)));
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="시간대별 호출 수">
+      ${[0, 0.5, 1].map((f) => `<line class="grid-l" x1="${m.l}" x2="${W - m.r}" y1="${Y(top * f)}" y2="${Y(top * f)}"/><text class="axis-t" x="${m.l - 8}" y="${Y(top * f) + 4}" text-anchor="end">${fmt(top * f)}</text>`).join('')}
+      ${points.map((p, i) => { const x = m.l + slot * i + (slot - bw) / 2, y = Y(p.v), h = Math.max(0, H - m.b - y);
+        return `<g class="bar" data-i="${i}"><rect x="${m.l + slot * i}" y="${m.t}" width="${slot}" height="${H - m.t - m.b}" fill="transparent"/>
+        ${h >= 4 ? `<path d="M${x},${H - m.b}V${y + 4}q0,-4 4,-4h${bw - 8}q4,0 4,4V${H - m.b}Z" fill="var(--brand)" opacity="${p.dim ? 0.35 : 1}"/>` : `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="var(--brand)"/>`}
+        ${i % every === 0 ? `<text class="axis-t" x="${x + bw / 2}" y="${H - 6}" text-anchor="middle">${esc(p.label)}</text>` : ''}</g>`; }).join('')}
+    </svg><div class="tip"></div>`;
+    const t = $('.tip', host);
+    $$('.bar', host).forEach((g) => {
+      const show = () => {
+        const p = points[+g.dataset.i], r = host.getBoundingClientRect(), b = g.getBoundingClientRect();
+        t.innerHTML = `<b>${esc(p.label)}</b><div><span>호출</span><span>${fmt(p.v)}</span></div>${tip(p)}`;
+        t.style.left = `${Math.min(Math.max(b.left - r.left + b.width / 2, 90), r.width - 90)}px`;
+        t.style.top = `${Y(p.v) / H * r.height}px`;
+        t.classList.add('on');
+      };
+      g.addEventListener('pointerenter', show); g.addEventListener('pointerdown', show);
+      g.addEventListener('pointerleave', () => t.classList.remove('on'));
+    });
+  }
+
   // 숫자가 부드럽게 바뀌도록
   function tween(el, to, fmt = (v) => n(v), ms = 500) {
     const from = +(el.dataset.v || 0);
@@ -217,5 +248,5 @@
   }
   initTheme();
 
-  global.UI = { $, $$, esc, icon, n, won, time, ago, toast, sheet, closeSheet, confirmSheet, copy, lineChart, tween, toggleTheme };
+  global.UI = { $, $$, esc, icon, n, won, time, ago, toast, sheet, closeSheet, confirmSheet, copy, lineChart, barChart, tween, toggleTheme };
 })(window);
