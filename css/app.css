@@ -98,7 +98,7 @@ svg { display: block; }
   display: flex; flex-direction: column; gap: 2px;
 }
 .logo { display: flex; align-items: center; gap: 10px; padding: 2px 8px 20px; font-weight: 700; font-size: 15px; letter-spacing: -0.02em; line-height: 1.25; }
-.logo-mark { width: 28px; height: 28px; flex: none; color: var(--brand); }
+.logo-mark { width: 28px; height: 28px; flex: none; }
 .logo-mark svg { width: 28px; height: 28px; }
 .logo small { display: block; font-size: 12px; font-weight: 400; color: var(--ink-3); letter-spacing: 0; }
 .nav-label { padding: 18px 10px 6px; font-size: 12px; color: var(--ink-3); }
