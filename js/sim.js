@@ -1,646 +1,518 @@
-/* =====================================================================
- * sim.js — 가상 세계
- * 직원 · 공격자 · 공급자(Mock Provider) · 게이트웨이 · 탐지 규칙을
- * 브라우저 안에서 흉내 낸다. 화면은 이 파일을 직접 부르지 않고
- * 반드시 api.js를 거친다. (api.js의 MODE="sim"일 때만 쓰인다)
+/* sim.js — 브라우저 안에서 도는 NovemberApiGateway 축소판
  *
- * 시간: 모든 동작은 "시뮬레이션 초(t)" 기준. 실제 시계와 분리되어 있어
- *       일시정지·배속·되감기(리셋 후 빨리감기)가 가능하다.
- * 규칙 숫자는 feature-spec.md 의 상수와 같다.
- * ===================================================================== */
+ * 백엔드(github.com/Seokyoung-Hong/NovemberApiGateway)가 없을 때 화면을 같은 모양의 데이터로 움직이기 위한 것.
+ * 규칙은 원본 app/contract.py · detector/router.py와 같다:
+ *   - 판정 = 설명되지 않는 호출 수 = max(0, 공급자 − 게이트웨이(지연 정렬) − 3)
+ *   - 한도 L의 10% SUSPECT / 50% WARNING / 70% BREACH → 폐기 → 예비키 승격 → 통보 → 검증
+ *   - 공급자 집계 지연 2초, 워커 2초 주기, 하강 히스테리시스 10초, 복구 표시 10초
+ * 응답 JSON 모양은 실서버와 같다(docs/contract.md C·D·E·H·J절).
+ */
 (function (global) {
   'use strict';
 
-  // ---- 데모 상수 (feature-spec F2, F6, F8, F12) ---------------------------
-  const C = Object.freeze({
-    PRICE_PER_TOKEN_KRW: 0.4,   // 비용 = total_tokens × 0.4원 (게이트웨이·공급자 동일 공식)
-    SUSPECT: 0.1,               // 한도의 10% → 의심
-    WARN: 0.5,                  // 50% → 경고
-    BLOCK: 0.7,                 // 70% → 자동 차단
-    TOLERANCE_KRW: 5000,        // 진행 중 요청·집계 지연 흡수
-    RECON_SEC: 3,               // 공급자 사용량 수집·대조 주기
-    PROVIDER_LAG_SEC: 1,        // 공급자 집계 지연 (Mock)
-    BUCKET_SEC: 3,              // 차트 시계열 버킷
-    ATTACK_RPS: 5,              // 공격: 초당 5회
-    ATTACK_TOKENS: 2000,        // 건당 2,000토큰 = 800원
-    DEFAULT_TOKENS: 300,
-    DEFAULT_LIMIT_KRW: 100000,
-    WIF_TTL_SEC: 15 * 60,       // WIF 단기 토큰 15분
-    RESPONSE_STEP_SEC: 0.35,    // 자동 대응 단계 사이 간격(화면에서 단계가 보이도록)
-  });
+  const LAG_S = 2, POLL_S = 2, TOL = 3, HYST_S = 10, RECOVERED_HOLD_S = 10;
+  const RATIOS = [0.1, 0.5, 0.7];
+  const COST_PER_TOKEN = 0.4;
+  const ATTACK_RPS = 5, ATTACK_TOKENS = 2000;
+  const LEAKED_KEY = 'sk-mock-K1-leaked-demo';
+  const ORDER = ['NORMAL', 'SUSPECT', 'WARNING', 'BREACH'];
+  const PRICE = { in: 0.15, out: 0.6 }; // gpt-4o-mini USD / 1M 토큰
+  const USD_TO_KRW = 1400;
 
-  const costOf = (tokens) => Math.round(tokens * C.PRICE_PER_TOKEN_KRW);
-
-  // ---- 유틸 ---------------------------------------------------------------
-  function rng(seed) { // mulberry32 — 같은 seed면 같은 세계
-    let a = seed >>> 0;
-    return function () {
-      a |= 0; a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-  function hash(str) { // FNV-1a, 데모용 "해시 저장" 흉내
-    let h = 0x811c9dc5;
-    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
-    return 'fnv1a:' + (h >>> 0).toString(16).padStart(8, '0');
-  }
-  const maskKey = (raw) => raw.slice(0, 3) + '...' + raw.slice(-4);
-  const maskToken = (raw) => (raw ? raw.slice(0, 3) + '...' + raw.slice(-4) : '(없음)');
-  function ipToInt(ip) {
-    const p = String(ip).split('.').map(Number);
-    if (p.length !== 4 || p.some((n) => !(n >= 0 && n <= 255))) return null;
-    return ((p[0] << 24) >>> 0) + (p[1] << 16) + (p[2] << 8) + p[3];
-  }
-  function cidrContains(cidr, ip) {
-    const [base, bitsStr] = cidr.split('/');
-    const bits = Number(bitsStr);
-    const b = ipToInt(base), x = ipToInt(ip);
-    if (b === null || x === null || !(bits >= 0 && bits <= 32)) return false;
-    const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
-    return ((b & mask) >>> 0) === ((x & mask) >>> 0);
-  }
+  const now = () => Date.now() / 1000;
+  const iso = (t) => (t == null ? null : new Date(t * 1000).toISOString());
+  const mask = (k) => (k.length > 8 ? `${k.slice(0, 3)}...${k.slice(-4)}` : '***');
+  const rnd = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b % 56]).join('');
   const clone = (o) => JSON.parse(JSON.stringify(o));
-  const RANK = { NORMAL: 0, SUSPECT: 1, WARNING: 2, BREACH: 3 };
 
-  // =====================================================================
-  //  World
-  // =====================================================================
-  function createWorld(opts = {}) {
-    // 데모 시작 시각: 2026-10-31 03:40:00 KST (마감 04:00 직전)
-    const EPOCH = opts.epochMs ?? Date.UTC(2026, 9, 30, 18, 40, 0);
-    const rand = rng(opts.seed ?? 20261031);
+  class HttpError extends Error {
+    constructor(status, body) { super(`${status}`); this.status = status; this.body = body; }
+  }
 
-    const w = {
-      t: 0,
-      C,
-      settings: { loss_limit_krw: C.DEFAULT_LIMIT_KRW },
-      credentials: [],
-      cidrs: [],
-      tokens: [],
-      services: {},          // name → 통계
-      usageLog: [],          // 게이트웨이 기록 (USAGE_LOG)
-      providerCharges: {},   // credential_id → [{at, cost, tokens, via}] (공급자 원장)
-      providerUsage: [],     // 수집 결과 (PROVIDER_USAGE)
-      reconciliations: [],
-      accessDenied: [],
-      events: [],
-      activity: [],          // 터미널 화면용 요청 피드 (데모 전용)
-      incidents: [],
-      honeykeys: [],
-      series: [],            // 차트 시계열 (3초 버킷, 누적)
-      attack: { running: false, credentialId: null, nextAt: 0, calls: 0, spent: 0, blockedAt: null },
-      traffic: { auto: false, nextA: 0, nextB: 0 },
-      employees: {},         // name → { token(raw), ip, model }
-      scheduled: [],         // 자동 대응 단계 예약
-      _ids: 1, _nextRecon: C.RECON_SEC, _nextBucket: 0, _lastRecon: null,
-    };
+  function judge(diff, limit) {
+    const r = diff / limit;
+    if (r >= RATIOS[2]) return 'BREACH';
+    if (r >= RATIOS[1]) return 'WARNING';
+    if (r >= RATIOS[0]) return 'SUSPECT';
+    return 'NORMAL';
+  }
 
-    const id = (p) => `${p}_${w._ids++}`;
-    const iso = (t = w.t) => new Date(EPOCH + t * 1000).toISOString();
-    w.iso = iso;
+  function ipIn(ip, cidr) {
+    if (cidr.includes(':') || ip.includes(':')) return cidr === `${ip}/128`;
+    const [net, bits] = cidr.split('/');
+    const toN = (s) => s.split('.').reduce((a, b) => (a << 8) + (+b), 0) >>> 0;
+    const m = +bits === 0 ? 0 : (~0 << (32 - +bits)) >>> 0;
+    return (toN(ip) & m) === (toN(net) & m);
+  }
 
-    // ---- 기록 헬퍼 ---------------------------------------------------------
-    function event(level, type, title, message, extra = {}) {
-      const e = { id: w._ids++, at: iso(), t: w.t, level, type, title, message, ...extra };
-      w.events.push(e);
-      if (w.events.length > 300) w.events.shift();
-      return e;
-    }
-    function activity(actor, line) {
-      w.activity.push({ id: w._ids++, at: iso(), t: w.t, actor, ...line });
-      if (w.activity.length > 400) w.activity.shift();
-    }
-    function service(name) {
-      if (!w.services[name]) w.services[name] = { name, calls: 0, denied: 0, tokens: 0, cost_krw: 0, last_ip: null, last_at: null, status: 'ACTIVE' };
-      return w.services[name];
-    }
+  function World() {
+    let S;
+    let seq;
+    const timers = new Set();
+    const later = (ms, fn) => { const id = setTimeout(() => { timers.delete(id); fn(); }, ms); timers.add(id); };
 
-    // ---- Mock Provider ----------------------------------------------------
+    // ---------- 공급자(Mock) ----------
     const provider = {
-      // POST /v1/chat/completions (공급자에 직접) — 키가 폐기됐으면 401
-      call(credId, tokens, via) {
-        const cred = w.credentials.find((c) => c.id === credId);
-        if (!cred || cred.status !== 'ACTIVE') return { status: 401, error: 'invalid_api_key' };
-        const cost = costOf(tokens);
-        (w.providerCharges[credId] ||= []).push({ at: w.t, cost, tokens, via });
-        return { status: 200, tokens, cost };
+      revoked: new Set(),
+      reqs: {}, // owner -> [[at, tokens]]
+      call(owner, tokens) {
+        if (this.revoked.has(owner)) return 401;
+        (this.reqs[owner] ||= []).push([now(), tokens]);
+        return 200;
       },
-      // GET /usage — 집계 지연(PROVIDER_LAG_SEC) 반영
-      reported(credId, t = w.t) {
-        const list = w.providerCharges[credId] || [];
-        let cost = 0, tokens = 0;
-        for (const c of list) if (c.at <= t - C.PROVIDER_LAG_SEC) { cost += c.cost; tokens += c.tokens; }
-        return { cost, tokens };
-      },
-      actual(credId) { // 공급자 내부 실제 청구액(지연 없음) — 사고 확정 손실 계산용
-        return (w.providerCharges[credId] || []).reduce((s, c) => s + c.cost, 0);
-      },
-      revoke(credId) { // POST /keys/{id}/revoke
-        const cred = w.credentials.find((c) => c.id === credId);
-        if (cred) cred.status = 'REVOKED';
-        return { status: 200 };
+      usage(owner, t) {
+        const rs = (this.reqs[owner] || []).filter((r) => r[0] <= t - LAG_S);
+        const tokens = rs.reduce((a, r) => a + r[1], 0);
+        return { requests: rs.length, tokens, cost_krw: tokens * COST_PER_TOKEN };
       },
     };
-    w.provider = provider;
 
-    // ---- 관리자 동작 (F1~F4) ------------------------------------------------
-    function registerCredential(input) {
-      const cred = {
-        id: input.id || id('cred'),
-        label: input.label || 'K' + w.credentials.length,
-        name: input.name || '',
-        provider: input.provider || 'openai',
-        auth_mode: input.auth_mode || 'API_KEY',
-        role: input.role || 'PRIMARY',
-        status: 'ACTIVE',
-        masked: null,
-        secret_ref: null,
-        audience: null,
-        trusted_identity: null,
-        sts_expires_at: null,
-        replaced_by_id: null,
-        verdict: 'NORMAL',
-        first_suspect_at: null,
-        first_warning_at: null,
-        created_at: iso(),
+    function event(kind, message, data) {
+      S.events.push({ id: ++seq.event, at: iso(now()), kind, message, data: data || null });
+    }
+
+    function reset() {
+      timers.forEach(clearTimeout); timers.clear();
+      provider.revoked.clear(); provider.reqs = {};
+      seq = { cred: 0, svc: 0, tok: 0, cidr: 0, event: 0, inc: 0, hk: 0, ti: 0, denied: 0 };
+      const t = iso(now());
+      S = {
+        settings: { unauthorized_call_limit: 100, loss_limit_krw: 100000 },
+        budget: null, wifAudience: 'november-gateway',
+        creds: [], services: [], tokens: [], cidrs: [], usage: [], snaps: [], denied: [], incidents: [], events: [],
+        honeykeys: [], hkEvents: [], blockedIps: {}, trusted: [], jwts: {},
+        judged: {}, view: {}, attack: false, updatedAt: now(), t0: now(),
       };
-      if (cred.auth_mode === 'API_KEY') {
-        const raw = input.api_key || ('sk-proj-' + Math.floor(rand() * 1e12).toString(36) + 'a9f2');
-        cred.masked = maskKey(raw);
-        cred.secret_ref = `vault://ai-gateway/${cred.provider}/${cred.label.toLowerCase()}`;
-        // 원문은 여기서 버린다 (암호화 저장 흉내). 화면·로그 어디에도 남기지 않음.
-      } else {
-        cred.audience = input.audience || `https://sts.${cred.provider}.mock/aud/ntrophy-gateway`;
-        cred.trusted_identity = input.trusted_identity || 'spiffe://ntrophy/gateway';
-        cred.secret_ref = `wif://${cred.provider}/${cred.label.toLowerCase()}`;
-        cred.sts_expires_at = iso(w.t + C.WIF_TTL_SEC);
-      }
-      // 프로바이더당 ACTIVE PRIMARY는 1개
-      if (cred.role === 'PRIMARY') {
-        const dup = w.credentials.find((c) => c.provider === cred.provider && c.role === 'PRIMARY' && c.status === 'ACTIVE');
-        if (dup) cred.role = 'STANDBY';
-      }
-      w.credentials.push(cred);
-      w.providerCharges[cred.id] = w.providerCharges[cred.id] || [];
-      if (cred.auth_mode === 'API_KEY') {
-        event('success', 'CREDENTIAL_REGISTERED', `${cred.label} 등록 · Vault 암호화 저장 완료`,
-          `${cred.provider} ${cred.role === 'STANDBY' ? '예비 키' : '운영 키'} ${cred.masked}`, { credential_id: cred.id });
-      } else {
-        event('success', 'CREDENTIAL_REGISTERED', `${cred.label} 등록 · 장기 키 없음`,
-          `${cred.provider} WIF · 단기 토큰 15분 자동 발급`, { credential_id: cred.id });
-      }
-      return clone(cred);
-    }
-    function deleteCredential(credId) {
-      w.credentials = w.credentials.filter((c) => c.id !== credId);
-      return { ok: true };
-    }
-    function setSettings(s) {
-      const before = w.settings.loss_limit_krw;
-      if (s.loss_limit_krw != null) w.settings.loss_limit_krw = Math.max(1000, Math.round(Number(s.loss_limit_krw)));
-      const L = w.settings.loss_limit_krw;
-      event('info', 'SETTINGS_UPDATED', `손실 한도 ${fmt(L)}원으로 설정`,
-        `한도의 50%(${fmt(L * C.WARN)}원)에서 경고, 70%(${fmt(L * C.BLOCK)}원)에서 자동 차단`, { before, after: L });
-      evaluate(); // 변경은 즉시 판정에 반영
-      return clone(w.settings);
-    }
-    function addCidr(cidr, label = 'INTERNAL') {
-      const row = { id: id('cidr'), cidr, label, created_at: iso() };
-      w.cidrs.push(row);
-      event('info', 'CIDR_ADDED', `허용 대역 추가 · ${cidr}`, label === 'VPN' ? 'VPN 접속 직원 대역' : '사내 네트워크 대역');
-      return clone(row);
-    }
-    function deleteCidr(cidrId) { w.cidrs = w.cidrs.filter((c) => c.id !== cidrId); return { ok: true }; }
-    function issueToken(serviceName) {
-      const raw = 'gw_' + Array.from({ length: 22 }, () => 'abcdefghjkmnpqrstuvwxyz23456789'[Math.floor(rand() * 31)]).join('');
-      const row = { id: id('tok'), service: serviceName, token_hash: hash(raw), masked: maskToken(raw), status: 'ACTIVE', created_at: iso(), last_used_at: null };
-      w.tokens.push(row);
-      service(serviceName);
-      event('info', 'TOKEN_ISSUED', `${serviceName} 게이트웨이 토큰 발급`, `공급자 키는 전달하지 않음 · ${row.masked}`);
-      return { ...clone(row), token: raw }; // 원문은 발급 응답에서 1회만
-    }
-    function revokeToken(tokId) {
-      const t = w.tokens.find((x) => x.id === tokId);
-      if (t) { t.status = 'REVOKED'; event('info', 'TOKEN_REVOKED', `${t.service} 토큰 폐기`, t.masked); }
-      return { ok: true };
-    }
-
-    // ---- 게이트웨이: 요청 중계 + 접근 통제 (F5, F6) -------------------------
-    function gatewayCall({ service: svcName, token, ip, model = 'gpt-4o-mini', tokens = C.DEFAULT_TOKENS, actor }) {
-      const who = actor || svcName;
-      const providerName = model.startsWith('claude') ? 'claude' : 'openai';
-      const reqLine = { method: 'POST', path: '/v1/chat/completions', ip, model };
-      // ① 출발 IP ∈ 허용 대역
-      const allowed = w.cidrs.some((c) => cidrContains(c.cidr, ip));
-      if (!allowed) {
-        const row = { id: w._ids++, at: iso(), source_ip: ip, reason: 'IP_NOT_ALLOWED', reason_text: '허용 대역 밖 IP', token_masked: maskToken(token), status_code: 403, service: svcName };
-        w.accessDenied.unshift(row); w.accessDenied.length = Math.min(w.accessDenied.length, 100);
-        service(svcName).denied++;
-        activity(who, { ...reqLine, status: 403, text: '403 Forbidden · 허용 대역 밖 IP' });
-        event('warning', 'ACCESS_DENIED', '허용 대역 밖 접속 거부', `${ip} · ${svcName} 토큰 · 403`, { source_ip: ip });
-        return { status: 403 };
-      }
-      // ② 토큰 유효
-      const tokRow = token && w.tokens.find((x) => x.token_hash === hash(token));
-      const honey = token && w.honeykeys.find((h) => h.decoy_value_hash === hash(token));
-      if (honey) return honeykeyHit(honey, ip, who);
-      if (!tokRow || tokRow.status !== 'ACTIVE') {
-        const row = { id: w._ids++, at: iso(), source_ip: ip, reason: 'INVALID_TOKEN', reason_text: '유효하지 않은 토큰', token_masked: maskToken(token), status_code: 401, service: svcName };
-        w.accessDenied.unshift(row); w.accessDenied.length = Math.min(w.accessDenied.length, 100);
-        activity(who, { ...reqLine, status: 401, text: '401 Unauthorized · 토큰 무효' });
-        event('warning', 'ACCESS_DENIED', '유효하지 않은 토큰 거부', `${ip} · 401`, { source_ip: ip });
-        return { status: 401 };
-      }
-      // ③ 서비스 상태
-      const svc = service(tokRow.service);
-      if (svc.status !== 'ACTIVE') { activity(who, { ...reqLine, status: 403, text: '403 · 서비스 중지됨' }); return { status: 403 }; }
-      // 통과 → 현재 PRIMARY 크레덴셜로 중계
-      const cred = w.credentials.find((c) => c.provider === providerName && c.role === 'PRIMARY' && c.status === 'ACTIVE');
-      if (!cred) {
-        activity(who, { ...reqLine, status: 503, text: '503 · 사용 가능한 인증정보 없음' });
-        return { status: 503 };
-      }
-      if (cred.auth_mode === 'WIF') {
-        const exp = Date.parse(cred.sts_expires_at) - EPOCH;
-        if (exp / 1000 - w.t < 60) cred.sts_expires_at = iso(w.t + C.WIF_TTL_SEC); // 만료 전 갱신
-      }
-      const res = provider.call(cred.id, tokens, 'gateway');
-      if (res.status !== 200) { activity(who, { ...reqLine, status: res.status, text: `${res.status} · 공급자 거부` }); return res; }
-      const log = { id: w._ids++, service: svc.name, credential_id: cred.id, credential_label: cred.label, model, input_tokens: Math.round(tokens * 0.3), output_tokens: tokens - Math.round(tokens * 0.3), total_tokens: tokens, cost_krw: res.cost, status_code: 200, source_ip: ip, requested_at: iso(), t: w.t };
-      w.usageLog.push(log); if (w.usageLog.length > 2000) w.usageLog.shift();
-      svc.calls++; svc.tokens += tokens; svc.cost_krw += res.cost; svc.last_ip = ip; svc.last_at = iso();
-      tokRow.last_used_at = iso();
-      activity(who, { ...reqLine, status: 200, text: `200 OK · ${tokens} tokens · ${fmt(res.cost)}원`, credential_label: cred.label, cost_krw: res.cost });
-      // 승격 키로 첫 성공 → 사고 RESOLVED (F9-5)
-      for (const inc of w.incidents) {
-        if (inc.status === 'ROTATED' && inc.new_credential_id === cred.id) {
-          inc.status = 'RESOLVED'; inc.resolved_at = iso();
-          inc.timeline.push({ step: 'RECOVERED', label: '정상 서비스 복구 확인', at: iso(), result: `${svc.name} 호출 성공 (${cred.label} 사용, 토큰 변경 없음)` });
-          event('success', 'RECOVERED', '정상 서비스 복구', `${svc.name} · 같은 토큰으로 호출 성공 · ${cred.label} 사용`, { incident_id: inc.id });
-        }
-      }
-      return { status: 200, credential: cred.label, cost_krw: res.cost };
-    }
-
-    // ---- 허니키 (F15, P2) --------------------------------------------------
-    function plantHoneykey(kind = 'GATEWAY_TOKEN', plantedAt = '.env.example') {
-      const raw = 'gw_decoy' + Math.floor(rand() * 1e9).toString(36);
-      const h = { id: id('honey'), kind, decoy_value_hash: hash(raw), planted_at: plantedAt, _raw: raw };
-      w.honeykeys.push(h);
-      return h;
-    }
-    function honeykeyHit(h, ip, who) {
-      const ev = { id: w._ids++, honeykey_id: h.id, source_ip: ip, path: '/v1/chat/completions', occurred_at: iso() };
-      const inc = { id: id('inc'), trigger_type: 'HONEYKEY', credential_id: null, credential_label: null, status: 'OPEN', detected_at: iso(), blocked_at: iso(), resolved_at: null, notified_at: iso(), loss_krw: 0, limit_krw: w.settings.loss_limit_krw, revoked_label: null, new_credential_label: null, new_credential_id: null, honeykey_event: ev,
-        timeline: [{ step: 'HONEYKEY', label: '허니키 접근 탐지', at: iso(), result: `${ip} · ${h.planted_at}에 심어둔 가짜 토큰` }, { step: 'NOTIFIED', label: '관리자 통보', at: iso(), result: '대시보드 배너' }] };
-      w.incidents.unshift(inc);
-      activity(who, { method: 'POST', path: '/v1/chat/completions', ip, status: 401, text: '401 · 허니키 감지' });
-      event('danger', 'HONEYKEY', '허니키 접근 탐지', `${ip}에서 가짜 토큰 사용 · 게이트웨이 공격 의심`, { incident_id: inc.id });
-      return { status: 401 };
-    }
-
-    // ---- 공격자 (F12) — 게이트웨이를 거치지 않고 공급자에 직접 -------------
-    function startAttack(credLabel = 'K1') {
-      const cred = w.credentials.find((c) => c.label === credLabel);
-      if (!cred) return { ok: false };
-      w.attack = { running: true, credentialId: cred.id, label: cred.label, masked: cred.masked, nextAt: w.t, calls: 0, spent: 0, startedAt: w.t, blockedAt: null };
-      activity('attacker', { kind: 'cmd', text: `python flood.py --key ${cred.masked} --rps ${C.ATTACK_RPS} --max_tokens ${C.ATTACK_TOKENS}` });
-      return { ok: true };
-    }
-    function stopAttack() { w.attack.running = false; return { ok: true }; }
-    function attackTick() {
-      const a = w.attack;
-      while (a.running && a.nextAt <= w.t) {
-        const res = provider.call(a.credentialId, C.ATTACK_TOKENS, 'attacker');
-        if (res.status === 200) {
-          a.calls++; a.spent += res.cost;
-          activity('attacker', { method: 'POST', path: 'api.provider.mock/v1/chat/completions', status: 200, text: `200 OK · ${C.ATTACK_TOKENS} tokens · ${fmt(res.cost)}원`, cost_krw: res.cost });
-        } else {
-          a.running = false; a.blockedAt = w.t;
-          activity('attacker', { method: 'POST', path: 'api.provider.mock/v1/chat/completions', status: 401, text: '401 Unauthorized · invalid_api_key' });
-          activity('attacker', { kind: 'exit', text: `공격 중단 · 총 ${a.calls}회 · ${fmt(a.spent)}원 사용` });
-          event('success', 'ATTACK_STOPPED', '공격 차단됨 · 401', `유출 키 ${a.label}로 들어온 직접 호출이 401로 실패`, {});
-        }
-        a.nextAt += 1 / C.ATTACK_RPS;
-      }
-    }
-
-    // ---- 자동 트래픽 (정상 직원 호출) --------------------------------------
-    function setEmployee(name, cfg) { w.employees[name] = { ...(w.employees[name] || {}), ...cfg }; }
-    function trafficTick() {
-      if (!w.traffic.auto) return;
-      for (const [name, emp] of Object.entries(w.employees)) {
-        if (!emp.token || emp.paused) continue;
-        if (emp.nextAt == null) emp.nextAt = w.t + rand() * 1.2;
-        if (w.t >= emp.nextAt) {
-          const tokens = 250 + Math.floor(rand() * 18) * 50; // 250~1,100 tokens
-          gatewayCall({ service: name, token: emp.token, ip: emp.ip, model: emp.model, tokens, actor: emp.actor || name });
-          emp.nextAt = w.t + (emp.every || 2.2) * (0.75 + rand() * 0.5);
-        }
-      }
-    }
-
-    // ---- 공급자 사용량 수집 + 대조·판정 (F7, F8) ----------------------------
-    function collectAndReconcile() {
-      const L = w.settings.loss_limit_krw;
-      for (const cred of w.credentials) {
-        if (cred.status !== 'ACTIVE') continue; // 폐기된 키는 대조하지 않음
-        const rep = provider.reported(cred.id);
-        w.providerUsage.push({ id: w._ids++, credential_id: cred.id, cost_krw: rep.cost, total_tokens: rep.tokens, fetched_at: iso() });
-        if (w.providerUsage.length > 1000) w.providerUsage.shift();
-        const gw = gatewayTotals(cred.id);
-        const raw = rep.cost - gw.cost;
-        const diff = Math.max(0, raw - C.TOLERANCE_KRW);
-        const risk = Math.min(diff / L, 1);
-        const verdict = diff >= L * C.BLOCK ? 'BREACH' : diff >= L * C.WARN ? 'WARNING' : diff >= L * C.SUSPECT ? 'SUSPECT' : 'NORMAL';
-        const rec = { id: w._ids++, credential_id: cred.id, credential_label: cred.label, at: iso(), t: w.t, gateway_cost_krw: gw.cost, provider_cost_krw: rep.cost, raw_diff_krw: raw, diff_krw: diff, gateway_tokens: gw.tokens, provider_tokens: rep.tokens, diff_tokens: rep.tokens - gw.tokens, risk_score: +risk.toFixed(3), verdict };
-        w.reconciliations.push(rec); if (w.reconciliations.length > 400) w.reconciliations.shift();
-        cred.last_recon = rec;
-        transition(cred, verdict, rec);
-      }
-      w._lastRecon = w.t;
-    }
-    function evaluate() { // 한도 변경 직후 마지막 수집값으로 재판정
-      const L = w.settings.loss_limit_krw;
-      for (const cred of w.credentials) {
-        if (cred.status !== 'ACTIVE' || !cred.last_recon) continue;
-        const r = cred.last_recon;
-        const verdict = r.diff_krw >= L * C.BLOCK ? 'BREACH' : r.diff_krw >= L * C.WARN ? 'WARNING' : r.diff_krw >= L * C.SUSPECT ? 'SUSPECT' : 'NORMAL';
-        r.risk_score = +Math.min(r.diff_krw / L, 1).toFixed(3);
-        transition(cred, verdict, r);
-      }
-    }
-    function transition(cred, verdict, rec) {
-      const prev = cred.verdict;
-      if (prev === 'BREACH') return;
-      cred.verdict = verdict;
-      if (RANK[verdict] > RANK[prev]) {
-        if (RANK[verdict] >= 1 && !cred.first_suspect_at) {
-          cred.first_suspect_at = iso();
-          event('warning', 'SUSPECT', '설명되지 않는 사용량', `${cred.label}: 공급자 보고가 게이트웨이 기록보다 ${fmt(rec.diff_krw + C.TOLERANCE_KRW)}원 많음`, { credential_id: cred.id });
-        }
-        if (RANK[verdict] >= 2 && !cred.first_warning_at) {
-          cred.first_warning_at = iso();
-          event('warning', 'WARNING', `한도 50% 도달 · ${cred.label}`, `차액 ${fmt(rec.diff_krw)}원 / 한도 ${fmt(w.settings.loss_limit_krw)}원 · 70%에서 자동 차단`, { credential_id: cred.id, toast: true });
-        }
-        if (verdict === 'BREACH') respond(cred, rec);
-      }
-    }
-    function gatewayTotals(credId) {
-      let cost = 0, tokens = 0;
-      for (const u of w.usageLog) if (u.credential_id === credId) { cost += u.cost_krw; tokens += u.total_tokens; }
-      return { cost, tokens };
-    }
-
-    // ---- 자동 대응 (F9) + 사고 기록 (F10) -----------------------------------
-    function respond(cred, rec) {
-      if (w.incidents.some((i) => i.credential_id === cred.id)) return; // 멱등
-      const L = w.settings.loss_limit_krw;
-      const inc = {
-        id: id('inc'), trigger_type: 'RECONCILIATION', credential_id: cred.id, credential_label: cred.label,
-        revoked_label: cred.label, revoked_masked: cred.masked,
-        reconciliation_id: rec.id, status: 'OPEN',
-        new_credential_id: null, new_credential_label: null, new_credential_masked: null,
-        suspect_at: cred.first_suspect_at, warning_at: cred.first_warning_at,
-        detected_at: cred.first_suspect_at || iso(), breach_at: iso(), blocked_at: null, resolved_at: null, notified_at: null,
-        diff_at_breach_krw: rec.diff_krw, loss_krw: rec.raw_diff_krw, limit_krw: L, seconds_to_block: null,
-        timeline: [],
-      };
-      if (cred.first_suspect_at) inc.timeline.push({ step: 'SUSPECT', label: '설명되지 않는 사용량 탐지', at: cred.first_suspect_at, result: '공급자 보고 > 게이트웨이 기록' });
-      if (cred.first_warning_at) inc.timeline.push({ step: 'WARNING', label: '한도 50% 경고', at: cred.first_warning_at, result: '관리자 경고 알림' });
-      inc.timeline.push({ step: 'BREACH', label: '위험도 판정 BREACH', at: iso(), result: `차액 ${fmt(rec.diff_krw)}원 ≥ 차단선 ${fmt(L * C.BLOCK)}원 (risk ${rec.risk_score.toFixed(2)})` });
-      w.incidents.unshift(inc);
-      cred.responding = true;
-      event('danger', 'BREACH', `무단 사용 확정 · ${cred.label} 자동 차단 시작`, `차액 ${fmt(rec.diff_krw)}원이 한도 70%를 넘음`, { incident_id: inc.id, toast: true });
-
-      const S = C.RESPONSE_STEP_SEC;
-      schedule(S, () => { // 1. 폐기
-        provider.revoke(cred.id);
-        inc.blocked_at = iso(); inc.status = 'REVOKED';
-        inc.seconds_to_block = Math.round((Date.parse(inc.blocked_at) - Date.parse(inc.detected_at)) / 100) / 10;
-        inc.timeline.push({ step: 'REVOKED', label: `${cred.label} 폐기`, at: iso(), result: 'POST /keys/{id}/revoke → 200' });
-        event('danger', 'REVOKED', `${cred.label} 폐기 완료`, '공급자에서 키 무효화 · 이후 직접 호출은 401', { incident_id: inc.id });
+      [['127.0.0.1/32', 'INTERNAL'], ['::1/128', 'INTERNAL'], ['10.0.0.0/16', 'INTERNAL'], ['10.8.0.0/24', 'VPN']]
+        .forEach(([cidr, label]) => S.cidrs.push({ id: ++seq.cidr, cidr, label }));
+      const addCred = (auth_mode, role, key, audience) => S.creds.push({
+        id: ++seq.cred, provider: 'mock', auth_mode, role, status: 'ACTIVE', key,
+        masked: auth_mode === 'WIF' ? `WIF:${audience}` : mask(key), audience: audience || null,
+        ref: auth_mode === 'WIF' ? `wif:${audience}` : key, replaced_by_id: null, created_at: t,
       });
-      schedule(S * 2, () => { // 2. 예비키 승격
-        const standby = w.credentials.find((c) => c.provider === cred.provider && c.role === 'STANDBY' && c.status === 'ACTIVE');
-        if (standby) {
-          standby.role = 'PRIMARY'; cred.role = 'PRIMARY'; cred.replaced_by_id = standby.id;
-          inc.new_credential_id = standby.id; inc.new_credential_label = standby.label; inc.new_credential_masked = standby.masked;
-          inc.timeline.push({ step: 'PROMOTED', label: `예비 키 ${standby.label} → PRIMARY`, at: iso(), result: `replaced_by = ${standby.label}` });
-        } else {
-          inc.timeline.push({ step: 'NO_STANDBY', label: '예비 키 없음', at: iso(), result: '서비스 중단 · 관리자 조치 필요' });
-        }
-      });
-      schedule(S * 3, () => { // 3. 사고 기록 + 4. 관리자 통보 (같은 순간, 이후에야 복구 확인 가능)
-        inc.timeline.push({ step: 'ROTATED', label: '사고 기록 · 전환 완료', at: iso(), result: `상태 ${inc.new_credential_id ? 'ROTATED' : 'OPEN'}` });
-        inc.notified_at = iso();
-        inc.loss_krw = Math.max(0, provider.actual(cred.id) - gatewayTotals(cred.id).cost); // 확정 손실
-        inc.timeline.push({ step: 'NOTIFIED', label: '관리자 통보', at: iso(), result: `손실 ${fmt(inc.loss_krw)}원 / 한도 ${fmt(L)}원` });
-        event('danger', 'NOTIFIED', `차단됨 · 손실 ${fmt(inc.loss_krw)}원 / 한도 ${fmt(L)}원`,
-          `${cred.label} 폐기 → ${inc.new_credential_label || '예비 키 없음'} 전환`, { incident_id: inc.id, toast: true, banner: true });
-        inc.status = inc.new_credential_id ? 'ROTATED' : 'OPEN';
-      });
-    }
-    function schedule(delay, fn) { w.scheduled.push({ at: w.t + delay, fn }); }
-
-    // ---- 시계열 (차트) ----------------------------------------------------
-    function totalsNow() {
-      let gw = 0, pv = 0;
-      for (const u of w.usageLog) gw += u.cost_krw;
-      for (const cred of w.credentials) pv += provider.reported(cred.id).cost;
-      return { gw, pv };
-    }
-    function bucketTick() {
-      const { gw, pv } = totalsNow();
-      w.series.push({ t: w.t, at: iso(), gateway_cost_krw: gw, provider_cost_krw: pv, diff_krw: Math.max(0, pv - gw) });
-      if (w.series.length > 400) w.series.shift();
-    }
-
-    // ---- 시간 진행 ---------------------------------------------------------
-    function advance(dt) {
-      const STEP = 0.05;
-      let left = dt;
-      while (left > 1e-9) {
-        const h = Math.min(STEP, left);
-        w.t = +(w.t + h).toFixed(6);
-        left -= h;
-        // 예약된 대응 단계
-        if (w.scheduled.length) {
-          const due = w.scheduled.filter((s) => s.at <= w.t + 1e-9);
-          w.scheduled = w.scheduled.filter((s) => s.at > w.t + 1e-9);
-          due.forEach((s) => s.fn());
-        }
-        attackTick();
-        trafficTick();
-        if (w.t + 1e-9 >= w._nextRecon) { collectAndReconcile(); w._nextRecon += C.RECON_SEC; }
-        if (w.t + 1e-9 >= w._nextBucket) { bucketTick(); w._nextBucket += C.BUCKET_SEC; }
+      addCred('API_KEY', 'PRIMARY', LEAKED_KEY);
+      addCred('API_KEY', 'STANDBY', `sk-mock-S1-${rnd(8)}`);
+      addCred('WIF', 'STANDBY', null, 'novem-wif');
+      const tokens = {};
+      for (const name of ['직원A', '직원B']) {
+        const sid = ++seq.svc;
+        S.services.push({ id: sid, name, status: 'ACTIVE' });
+        tokens[name] = issue(sid).token;
       }
+      const honeykeys = {};
+      for (const planted of ['공개 저장소 .env.example', '사내 위키 설정 예시']) {
+        const v = `nvm-honey-${rnd(24)}`;
+        S.honeykeys.push({ id: ++seq.hk, value: v, masked: mask(v), planted_at: planted, created_at: t });
+        honeykeys[planted] = v;
+      }
+      return { tokens, honeykeys, note: 'trusted_identity(WIF 신뢰 규칙)도 삭제됨. WIF는 POST /demo/wif/seed 재실행' };
     }
 
-    // ---- 조회 (api.js가 F11 형태로 포장) ------------------------------------
-    function overallStatus() {
-      const live = w.incidents.find((i) => i.trigger_type === 'RECONCILIATION' && i.status !== 'RESOLVED');
-      if (live) return 'BLOCKED';
-      const active = w.credentials.filter((c) => c.status === 'ACTIVE');
-      const worst = active.reduce((m, c) => Math.max(m, RANK[c.verdict] || 0), 0);
-      if (worst >= 2) return 'WARNING';
-      if (worst >= 1) return 'SUSPECT';
-      if (w.incidents.some((i) => i.trigger_type === 'RECONCILIATION' && i.status === 'RESOLVED')) return 'RECOVERED';
-      return 'NORMAL';
+    function issue(sid) {
+      const token = `nvm-${rnd(32)}`;
+      const row = { id: ++seq.tok, service_id: sid, token, token_masked: mask(token), status: 'ACTIVE', created_at: iso(now()) };
+      S.tokens.push(row);
+      return row;
     }
-    function dashboard() {
-      const L = w.settings.loss_limit_krw;
-      const creds = w.credentials.map((c) => {
-        const gw = gatewayTotals(c.id); const rep = provider.reported(c.id);
-        const raw = rep.cost - gw.cost;
-        return { id: c.id, label: c.label, name: c.name, provider: c.provider, auth_mode: c.auth_mode, role: c.role, status: c.status, masked: c.masked,
-          gateway_cost_krw: gw.cost, provider_cost_krw: rep.cost, raw_diff_krw: raw,
-          diff_krw: c.status === 'ACTIVE' ? (c.last_recon ? c.last_recon.diff_krw : 0) : (c.last_recon ? c.last_recon.diff_krw : 0),
-          risk_score: c.last_recon ? c.last_recon.risk_score : 0, verdict: c.verdict, sts_expires_at: c.sts_expires_at };
-      });
-      const status = overallStatus();
-      const lastInc = w.incidents.find((i) => i.trigger_type === 'RECONCILIATION') || null;
-      // 게이지가 가리킬 크레덴셜: 사고 중이면 사고 키, 아니면 활성 키 중 최대 차액
-      let focus = null;
-      if (status === 'BLOCKED' && lastInc) focus = creds.find((c) => c.id === lastInc.credential_id);
-      else focus = creds.filter((c) => c.status === 'ACTIVE').sort((a, b) => b.diff_krw - a.diff_krw)[0] || null;
-      const tot = totalsNow();
-      const primary = w.credentials.find((c) => c.provider === 'openai' && c.role === 'PRIMARY' && c.status === 'ACTIVE');
+
+    const primary = () => S.creds.filter((c) => c.role === 'PRIMARY' && c.status === 'ACTIVE').sort((a, b) => a.id - b.id)[0];
+
+    // ---------- 게이트웨이 중계 ----------
+    function deny(status, reason, ip, token) {
+      const masked = token ? mask(token) : null;
+      S.denied.push({ id: ++seq.denied, at: now(), source_ip: ip, reason, token_masked: masked });
+      event('ACCESS_DENIED', `접근 거부(${reason}) ${ip}`, { source_ip: ip, reason, token_masked: masked });
+      throw new HttpError(status, { error: reason });
+    }
+
+    function gatewayCall({ token = '', ip = '127.0.0.1', model = 'mock', message = '', max_tokens = 300 }) {
+      const hk = S.honeykeys.find((h) => h.value === token);
+      if (hk) { honeyHit(hk, ip); throw new HttpError(401, { error: 'invalid_token' }); }
+      if ((S.blockedIps[ip] || 0) > now()) deny(403, 'ip_blocked', ip, token);
+      if (!S.cidrs.some((c) => ipIn(ip, c.cidr))) deny(403, 'ip_not_allowed', ip, token);
+      let tok = S.tokens.find((x) => x.token === token);
+      if (!tok && token.split('.').length === 3 && !token.startsWith('nvm-')) {
+        const j = S.jwts[token];
+        if (!j) deny(401, 'wif_invalid_signature', ip, 'sub');
+        if (j.exp < now()) deny(401, 'wif_expired', ip, j.sub);
+        const rule = S.trusted.find((r) => new RegExp('^' + r.subject_pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$').test(j.sub));
+        if (!rule) deny(401, 'wif_untrusted_identity', ip, j.sub);
+        tok = { status: 'ACTIVE', service_id: rule.service_id };
+      }
+      if (!tok || tok.status !== 'ACTIVE') deny(401, 'invalid_token', ip, token);
+      const svc = S.services.find((s) => s.id === tok.service_id);
+      if (!svc || svc.status !== 'ACTIVE') deny(403, 'service_suspended', ip, token);
+      const cred = primary();
+      if (!cred) throw new HttpError(503, { error: 'no_active_credential' });
+      if (provider.call(cred.ref, max_tokens) === 401) throw new HttpError(502, { error: 'upstream_error' });
+      const inp = Math.max(8, Math.round(message.length * 0.7));
+      S.usage.push({ service_id: svc.id, credential_id: cred.id, model, input_tokens: inp, output_tokens: max_tokens - Math.min(inp, max_tokens - 1), cost_krw: max_tokens * COST_PER_TOKEN, at: now() });
       return {
-        status,
-        diff_krw: focus ? focus.diff_krw : 0,
-        raw_diff_krw: focus ? focus.raw_diff_krw : 0,
-        focus_credential: focus ? focus.label : null,
-        limit_krw: L,
-        suspect_at: L * C.SUSPECT, warn_at: L * C.WARN, block_at: L * C.BLOCK,
-        tolerance_krw: C.TOLERANCE_KRW,
-        gateway_cost_krw: tot.gw, provider_cost_krw: tot.pv,
-        active_credential: primary ? { id: primary.id, label: primary.label, masked: primary.masked, auth_mode: primary.auth_mode } : null,
-        credentials: creds,
-        services: Object.values(w.services).map(clone),
-        last_incident: lastInc ? { id: lastInc.id, status: lastInc.status, loss_krw: lastInc.loss_krw, limit_krw: lastInc.limit_krw, revoked_label: lastInc.revoked_label, new_credential_label: lastInc.new_credential_label, blocked_at: lastInc.blocked_at, notified_at: lastInc.notified_at, resolved_at: lastInc.resolved_at, max_diff_krw: lastInc.diff_at_breach_krw } : null,
-        recon: { interval_sec: C.RECON_SEC, last_at: w._lastRecon != null ? iso(w._lastRecon) : null, next_in_sec: +(w._nextRecon - w.t).toFixed(2) },
-        attack: { running: w.attack.running, calls: w.attack.calls || 0, spent_krw: w.attack.spent || 0 },
-        updated_at: iso(),
+        id: `chatcmpl-${rnd(10)}`, object: 'chat.completion', model,
+        choices: [{ index: 0, message: { role: 'assistant', content: reply(message) }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: inp, completion_tokens: max_tokens - inp, total_tokens: max_tokens },
       };
     }
 
-    function fmt(n) { return Math.round(n).toLocaleString('ko-KR'); }
+    function honeyHit(hk, ip) {
+      const t = now();
+      S.blockedIps[ip] = t + 600;
+      const msg = `허니키 사용 탐지: ${hk.masked}(${hk.planted_at}) 출발 IP ${ip}`;
+      const dup = S.hkEvents.some((e) => e.honeykey_id === hk.id && e.source_ip === ip && e.at > t - 60);
+      S.hkEvents.push({ honeykey_id: hk.id, source_ip: ip, at: t });
+      let iid = null;
+      if (!dup) {
+        iid = ++seq.inc;
+        S.incidents.push({
+          id: iid, trigger_type: 'HONEYKEY', status: 'OPEN', credential_id: null, detected_at: t, blocked_at: t, resolved_at: null,
+          loss_calls: null, limit_calls: null, loss_krw: null, limit_krw: null, new_credential_id: null,
+          timeline: [{ at: iso(t), step: 'DETECTED', ok: true, detail: msg }, { at: iso(t), step: 'NOTIFY_ADMIN', ok: true, detail: `관리자 통보, ${ip} 600초 차단` }],
+        });
+      }
+      event('HONEYKEY', msg, { honeykey_id: hk.id, planted_at: hk.planted_at, source_ip: ip, incident_id: iid });
+    }
 
-    Object.assign(w, {
-      advance, registerCredential, deleteCredential, setSettings, addCidr, deleteCidr, issueToken, revokeToken,
-      gatewayCall, startAttack, stopAttack, setEmployee, plantHoneykey, dashboard, overallStatus,
-      logEvent: event,
-    });
-    return w;
-  }
+    // ---------- 탐지 워커 ----------
+    function gwCount(cid, until) {
+      return S.usage.filter((u) => u.credential_id === cid && (until == null || u.at <= until)).length;
+    }
+    function gwCost(cid) { return S.usage.filter((u) => u.credential_id === cid).reduce((a, u) => a + u.cost_krw, 0); }
 
-  // =====================================================================
-  //  데모 시드 (POST /demo/reset 과 같은 상태)
-  // =====================================================================
-  function seed(w) {
-    w.registerCredential({ id: 'cred_k1', label: 'K1', name: '운영 키', provider: 'openai', auth_mode: 'API_KEY', role: 'PRIMARY', api_key: 'sk-proj-7Hq2mZ0xLw4a9f2' });
-    w.registerCredential({ id: 'cred_k2', label: 'K2', name: 'WIF 연동', provider: 'claude', auth_mode: 'WIF', role: 'PRIMARY' });
-    w.registerCredential({ id: 'cred_s1', label: 'S1', name: '예비 키', provider: 'openai', auth_mode: 'API_KEY', role: 'STANDBY', api_key: 'sk-proj-Rt8vN1cQe5c41d' });
-    w.setSettings({ loss_limit_krw: 100000 });
-    w.addCidr('10.0.0.0/16', 'INTERNAL');
-    w.addCidr('10.8.0.0/24', 'VPN');
-    const a = w.issueToken('직원 A');
-    const b = w.issueToken('직원 B');
-    w.setEmployee('직원 A', { token: a.token, ip: '10.0.12.34', model: 'gpt-4o-mini', every: 2.0, actor: 'emp_a' });
-    w.setEmployee('직원 B', { token: b.token, ip: '10.8.0.21', model: 'claude-sonnet', every: 2.6, actor: 'emp_b' });
-    w.plantHoneykey('GATEWAY_TOKEN', '.env.example');
-    w.events.length = 0; // 시드 이벤트는 숨김
-    return w;
-  }
-
-  // =====================================================================
-  //  시나리오 (demo-scenario.md 장면 1~6)
-  //  at = 시뮬레이션 초. 장면 5·6 시작은 차단 시점에 맞춰 조정된 값.
-  // =====================================================================
-  const SCENES = [
-    { id: 1, key: 'register', title: '등록', start: 0, end: 14,
-      headline: '대표가 회사 AI 키를 게이트웨이에 맡깁니다',
-      body: '키 원문은 Vault에 암호화되어 들어가고 화면에는 끝 4자리만 남습니다. 직원은 공급자 키 대신 게이트웨이 토큰을 받습니다.' },
-    { id: 2, key: 'normal', title: '정상 운영', start: 14, end: 33,
-      headline: '직원들은 게이트웨이를 거쳐 AI를 씁니다',
-      body: '모든 호출이 기록되므로 게이트웨이 기록과 공급자 보고가 겹칩니다. 허용 대역 밖에서 온 호출은 같은 토큰이라도 403으로 막힙니다.' },
-    { id: 3, key: 'leak', title: '유출', start: 33, end: 42,
-      headline: '대표가 K1을 개인 프로젝트에 복사했다가 공개 저장소에 올립니다',
-      body: '게이트웨이는 아직 이 사실을 모릅니다. 유출 자체는 보이지 않는 곳에서 일어나고, 이것이 탐지 지연 문제입니다.' },
-    { id: 4, key: 'attack', title: '공격', start: 42, end: 62,
-      headline: '공격자가 유출된 K1으로 공급자에 직접 호출합니다',
-      body: '게이트웨이를 거치지 않으니 게이트웨이 기록은 그대로입니다. 공급자 보고만 오르고, 설명되지 않는 차액이 쌓입니다.' },
-    { id: 5, key: 'block', title: '자동 차단', start: 62, end: 72,
-      headline: '차액이 한도의 70%를 넘자 게이트웨이가 스스로 대응합니다',
-      body: 'K1 폐기, 예비 키 S1 승격, 사고 기록, 관리자 통보가 1초 안에 순서대로 끝납니다. 공격자의 호출은 401로 실패합니다.' },
-    { id: 6, key: 'recover', title: '복구', start: 72, end: 88,
-      headline: '직원은 아무것도 바꾸지 않았는데 서비스가 이어집니다',
-      body: '같은 게이트웨이 토큰으로 호출하면 내부적으로 S1이 쓰입니다. 손실은 한도 안에서 멈췄습니다.' },
-  ];
-  const DURATION = 88;
-
-  // 큐: 장면 진행 중 세계에 일어나는 일
-  function buildCues() {
-    let tokA, tokB;
-    return [
-      { at: 1.0, scene: 1, run: (w) => w.registerCredential({ id: 'cred_k1', label: 'K1', name: '운영 키', provider: 'openai', auth_mode: 'API_KEY', role: 'PRIMARY', api_key: 'sk-proj-7Hq2mZ0xLw4a9f2' }) },
-      { at: 3.0, scene: 1, run: (w) => w.registerCredential({ id: 'cred_k2', label: 'K2', name: 'WIF 연동', provider: 'claude', auth_mode: 'WIF', role: 'PRIMARY' }) },
-      { at: 5.0, scene: 1, run: (w) => w.registerCredential({ id: 'cred_s1', label: 'S1', name: '예비 키', provider: 'openai', auth_mode: 'API_KEY', role: 'STANDBY', api_key: 'sk-proj-Rt8vN1cQe5c41d' }) },
-      { at: 7.0, scene: 1, run: (w) => w.setSettings({ loss_limit_krw: 100000 }) },
-      { at: 9.0, scene: 1, run: (w) => w.addCidr('10.0.0.0/16', 'INTERNAL') },
-      { at: 10.0, scene: 1, run: (w) => w.addCidr('10.8.0.0/24', 'VPN') },
-      { at: 11.5, scene: 1, run: (w) => { tokA = w.issueToken('직원 A'); w.setEmployee('직원 A', { token: tokA.token, ip: '10.0.12.34', model: 'gpt-4o-mini', every: 2.0, actor: 'emp_a' }); } },
-      { at: 12.5, scene: 1, run: (w) => { tokB = w.issueToken('직원 B'); w.setEmployee('직원 B', { token: tokB.token, ip: '10.8.0.21', model: 'claude-sonnet', every: 2.6, actor: 'emp_b' }); } },
-      { at: 14.2, scene: 2, run: (w) => { w.traffic.auto = true; } },
-      { at: 24.0, scene: 2, run: (w) => w.gatewayCall({ service: '직원 B', token: tokB.token, ip: '203.0.113.57', model: 'claude-sonnet', tokens: 400, actor: 'outsider' }) },
-      { at: 35.0, scene: 3, run: (w) => { w.leak = { at: w.iso(), repo: 'daepyo-sideproject', file: '.env', masked: 'sk-...a9f2' }; } },
-      { at: 43.0, scene: 4, run: (w) => w.startAttack('K1') },
-      // 장면 5: 직원 A는 잠시 쉬고(차단 단계를 또렷하게 보이기 위해), 장면 6에서 "방금처럼" 호출
-      { at: 61.5, scene: 4, run: (w) => { w.employees['직원 A'].paused = true; } },
-      { at: 73.0, scene: 6, run: (w) => { const e = w.employees['직원 A']; w.gatewayCall({ service: '직원 A', token: e.token, ip: e.ip, model: e.model, tokens: 600, actor: 'emp_a' }); e.paused = false; e.nextAt = w.t + 2; } },
-      { at: 78.0, scene: 6, run: (w) => { w.wifNote = true; } },
-    ];
-  }
-
-  // =====================================================================
-  //  Director — 시나리오 재생기 (재생/일시정지/배속/장면 이동)
-  // =====================================================================
-  function createDirector(opts = {}) {
-    const d = {
-      world: null, cues: [], cueIdx: 0, playing: false, speed: 1,
-      scenes: SCENES, duration: DURATION,
-      reset() {
-        d.world = createWorld(opts);
-        d.cues = buildCues(); d.cueIdx = 0;
-        d.world.scenario = true;
-      },
-      tick(realDt) { if (d.playing) d.step(realDt * d.speed); },
-      step(dt) {
-        const w = d.world;
-        let left = Math.min(dt, d.duration - w.t);
-        while (left > 1e-9) {
-          const nextCue = d.cues[d.cueIdx];
-          const h = nextCue ? Math.min(left, Math.max(0, nextCue.at - w.t)) : left;
-          if (h > 0) w.advance(h);
-          left -= h;
-          while (d.cues[d.cueIdx] && d.cues[d.cueIdx].at <= w.t + 1e-9) { d.cues[d.cueIdx].run(w); d.cueIdx++; }
-          if (h === 0 && !d.cues[d.cueIdx]) { w.advance(left); left = 0; }
+    function tick() {
+      const t = now();
+      S.updatedAt = t;
+      const lim = S.settings.unauthorized_call_limit;
+      for (const cred of S.creds.filter((c) => c.status === 'ACTIVE')) {
+        const u = provider.usage(cred.ref, t);
+        S.snaps.push({ credential_id: cred.id, at: t, requests: u.requests, cost_krw: u.cost_krw });
+        const gc = gwCount(cred.id, t - LAG_S);
+        const diff = Math.max(0, u.requests - gc - TOL);
+        const certain = Math.max(0, u.requests - gwCount(cred.id) - TOL);
+        S.view[cred.id] = { gateway_calls: gc, provider_calls: u.requests, diff_calls: diff, certain_diff_calls: certain, calls_estimated: false };
+        const d = Math.max(diff, certain);
+        const level = judge(d, lim);
+        const j = (S.judged[cred.id] ||= { level: 'NORMAL', low: null });
+        if (ORDER.indexOf(level) > ORDER.indexOf(j.level)) { // 상승은 즉시
+          j.level = level; j.low = null;
+          if (level === 'SUSPECT') event('SUSPECT', `${cred.masked} 설명되지 않는 호출 ${d}건 (한도 ${lim}건)`, { credential_id: cred.id, diff_calls: d });
+          if (level === 'WARNING') event('WARNING', `${cred.masked} 경고: 설명되지 않는 호출 ${d}건`, { credential_id: cred.id, diff_calls: d });
+          if (level === 'BREACH') respond(cred, d, lim);
+        } else if (level !== j.level) { // 하강은 HYST_S 동안 유지될 때만
+          j.low ??= t;
+          if (t - j.low >= HYST_S) { j.level = level; j.low = null; }
+        } else {
+          j.low = null;
         }
-        if (w.t >= d.duration - 1e-6) d.playing = false;
+      }
+    }
+
+    function respond(cred, diff, lim) {
+      const t = now();
+      provider.revoked.add(cred.ref);
+      cred.status = 'REVOKED';
+      const sb = S.creds.filter((c) => c.role === 'STANDBY' && c.status === 'ACTIVE').sort((a, b) => a.id - b.id)[0];
+      if (sb) { sb.role = 'PRIMARY'; cred.replaced_by_id = sb.id; }
+      const iid = ++seq.inc;
+      const limKrw = S.settings.loss_limit_krw;
+      const inc = {
+        id: iid, trigger_type: 'RECONCILIATION', status: 'OPEN', credential_id: cred.id, detected_at: t, blocked_at: t, resolved_at: null,
+        loss_calls: diff, limit_calls: lim, loss_krw: Math.max(0, provider.usage(cred.ref, t).cost_krw - gwCost(cred.id)), limit_krw: limKrw,
+        new_credential_id: sb ? sb.id : null,
+        timeline: [
+          { at: iso(t), step: 'DETECTED', ok: true, detail: `설명되지 않는 호출 ${diff}건 ≥ 차단선 ${lim * RATIOS[2]}건` },
+          { at: iso(t), step: 'REVOKE_PROVIDER_KEY', ok: true, detail: `${cred.masked} 공급자에서 폐기` },
+        ],
+      };
+      S.incidents.push(inc);
+      event('BLOCKED', `${cred.masked} 자동 차단: 설명되지 않는 호출 ${diff}건`, { incident_id: iid, credential_id: cred.id });
+      const add = (step, ok, detail) => inc.timeline.push({ at: iso(now()), step, ok, detail });
+      later(1000, () => {
+        if (!sb) { add('PROMOTE_STANDBY', false, '예비 키 없음 — 서비스 중단'); return; }
+        inc.status = 'ROTATED';
+        add('PROMOTE_STANDBY', true, `${sb.masked} 주 키로 승격`);
+      });
+      later(2000, () => sb && add('NOTIFY_ADMIN', true, '관리자 대시보드 통보'));
+      later(2500, () => { // 폐기 후 공급자 최종 호출 수로 손실 재계산
+        const u = provider.usage(cred.ref, now() + LAG_S);
+        inc.loss_calls = Math.max(0, u.requests - gwCount(cred.id));
+        inc.loss_krw = Math.max(0, u.cost_krw - gwCost(cred.id));
+      });
+      later(3000, () => {
+        if (!sb) return;
+        const ok = provider.call(sb.ref, 1) === 200;
+        add('VERIFIED', ok, ok ? '승격 키로 호출 성공 확인' : '승격 키 호출 실패');
+        if (ok) { inc.status = 'RESOLVED'; inc.resolved_at = now(); event('RECOVERED', `${sb.masked}로 전환 완료, 서비스 정상`, { incident_id: iid }); }
+      });
+    }
+
+    // ---------- 공격 시뮬레이터 ----------
+    let attackTimer = null;
+    function attackStart() {
+      if (attackTimer) return;
+      const cred = primary();
+      if (!cred) return;
+      S.attack = true;
+      event('ATTACK_STARTED', `유출 키로 Mock 직접 호출 시작 (${ATTACK_RPS}건/초)`);
+      attackTimer = setInterval(() => {
+        if (provider.call(cred.ref, ATTACK_TOKENS) === 401) attackStop(`${cred.masked} 401(폐기됨)`);
+      }, 1000 / ATTACK_RPS);
+    }
+    function attackStop(reason) {
+      if (!attackTimer) return false;
+      clearInterval(attackTimer); attackTimer = null; S.attack = false;
+      event('ATTACK_STOPPED', `공격 종료: ${reason}`);
+      return true;
+    }
+
+    // ---------- 조회 ----------
+    function dashboard() {
+      const lim = S.settings.unauthorized_call_limit, limKrw = S.settings.loss_limit_krw;
+      let worst = 'NORMAL';
+      const tot = { g: 0, p: 0, gc: 0, pc: 0, dc: 0, cc: 0 };
+      const rows = S.creds.map((c) => {
+        const g = gwCost(c.id);
+        const last = [...S.snaps].reverse().find((s) => s.credential_id === c.id);
+        const p = last ? last.cost_krw : 0;
+        const a = S.view[c.id] || {};
+        const gc = a.gateway_calls || 0, pc = a.provider_calls || 0, dc = a.diff_calls || 0, cc = a.certain_diff_calls || 0;
+        tot.g += g; tot.p += p; tot.gc += gc; tot.pc += pc; tot.dc += dc; tot.cc += cc;
+        if (c.status === 'ACTIVE') { const j = (S.judged[c.id] || { level: 'NORMAL' }).level; if (ORDER.indexOf(j) > ORDER.indexOf(worst)) worst = j; }
+        return {
+          id: c.id, provider: c.provider, auth_mode: c.auth_mode, role: c.role, status: c.status, masked: c.masked,
+          gateway_cost_krw: g, provider_cost_krw: p, diff_krw: Math.max(0, p - g - 5000), diff_usd: Math.max(0, p - g) / USD_TO_KRW,
+          gateway_calls: gc, provider_calls: pc, diff_calls: dc, certain_diff_calls: cc, calls_estimated: false,
+        };
+      });
+      const inc = [...S.incidents].reverse().find((i) => i.trigger_type !== 'HONEYKEY');
+      let status = worst === 'BREACH' ? 'WARNING' : worst;
+      if (inc && inc.status !== 'RESOLVED') status = 'BLOCKED';
+      else if (inc && now() - inc.resolved_at < RECOVERED_HOLD_S) status = 'RECOVERED';
+      const act = primary();
+      return {
+        status, limit_krw: limKrw, warn_at_krw: limKrw * RATIOS[1], block_at_krw: limKrw * RATIOS[2],
+        diff_krw: Math.max(0, tot.p - tot.g - 5000), diff_usd: Math.max(0, tot.p - tot.g) / USD_TO_KRW,
+        gateway_cost_krw: tot.g, provider_cost_krw: tot.p,
+        limit_calls: lim, warn_at_calls: lim * RATIOS[1], block_at_calls: lim * RATIOS[2],
+        diff_calls: tot.dc, certain_diff_calls: tot.cc, gateway_calls: tot.gc, provider_calls: tot.pc,
+        active_credential: act ? { id: act.id, provider: act.provider, auth_mode: act.auth_mode, masked: act.masked } : null,
+        credentials: rows, attack_running: S.attack,
+        incident_id: inc && ['BLOCKED', 'RECOVERED'].includes(status) ? inc.id : null,
+        updated_at: iso(S.updatedAt),
+        honeykey_hits: S.hkEvents.slice(-5).reverse().map((e) => { const h = S.honeykeys.find((x) => x.id === e.honeykey_id); return { at: iso(e.at), honeykey_masked: h.masked, planted_at: h.planted_at, source_ip: e.source_ip }; }),
+        blocked_ips: Object.entries(S.blockedIps).filter(([, u]) => u > now()).map(([source_ip, u]) => ({ source_ip, until: iso(u) })),
+      };
+    }
+
+    function timeseries(range = 300) {
+      const t1 = now(), t0 = Math.max(t1 - range, S.t0 - 4); // 방금 시작한 세계는 시작 시점부터 그린다
+      const pts = [];
+      for (let t = t0 - (t0 % 2); t <= t1 + 2; t += 2) {
+        const last = {};
+        for (const s of S.snaps) if (s.at <= t) last[s.credential_id] = s;
+        const ul = S.usage.filter((u) => u.at <= t);
+        pts.push({
+          t: iso(t), gateway_calls: ul.length, gateway_krw: ul.reduce((a, u) => a + u.cost_krw, 0),
+          provider_calls: Object.values(last).reduce((a, s) => a + s.requests, 0), provider_krw: Object.values(last).reduce((a, s) => a + s.cost_krw, 0),
+        });
+      }
+      return { points: pts };
+    }
+
+    function incidentJson(i) {
+      const m = (id) => (S.creds.find((c) => c.id === id) || {}).masked || null;
+      return {
+        id: i.id, trigger_type: i.trigger_type, status: i.status, credential_id: i.credential_id, calls_estimated: false,
+        credential_masked: m(i.credential_id), detected_at: iso(i.detected_at), blocked_at: iso(i.blocked_at), resolved_at: iso(i.resolved_at),
+        duration_s: i.blocked_at ? Math.round((i.blocked_at - i.detected_at) * 1000) / 1000 : null,
+        loss_krw: i.loss_krw, limit_krw: i.limit_krw, loss_calls: i.loss_calls, limit_calls: i.limit_calls,
+        new_credential_id: i.new_credential_id, new_credential_masked: m(i.new_credential_id), timeline: i.timeline,
+      };
+    }
+
+    // ---------- 사용량 집계·예측 (H절) ----------
+    function rangeStart(range) {
+      const d = new Date();
+      if (range === 'day') { d.setHours(0, 0, 0, 0); return d.getTime() / 1000; }
+      if (range === 'week') return now() - 7 * 86400;
+      if (range === 'month') { d.setDate(1); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; }
+      return 0;
+    }
+    const est = (inp, out) => (inp * PRICE.in + out * PRICE.out) / 1e6 * USD_TO_KRW;
+    const zero = () => ({ calls: 0, input_tokens: 0, output_tokens: 0, cost_krw: 0, estimated_cost_krw: 0 });
+    const addTo = (a, u) => { a.calls++; a.input_tokens += u.input_tokens; a.output_tokens += u.output_tokens; a.cost_krw += u.cost_krw; a.estimated_cost_krw += est(u.input_tokens, u.output_tokens); };
+
+    function usageSummary(range = 'day') {
+      const since = rangeStart(range);
+      const total = zero(), svcs = {};
+      for (const u of S.usage.filter((x) => x.at >= since)) {
+        const s = S.services.find((x) => x.id === u.service_id) || { name: '?' };
+        const sv = (svcs[u.service_id] ||= { service_id: u.service_id, name: s.name, ...zero(), models: {} });
+        const md = (sv.models[u.model] ||= { model: u.model, ...zero(), estimated: true });
+        addTo(total, u); addTo(sv, u); addTo(md, u);
+      }
+      return {
+        range, from: iso(since), to: iso(now()), total,
+        services: Object.values(svcs).map((s) => ({ ...s, models: Object.values(s.models) })),
+      };
+    }
+
+    function usageForecast(windowHours = 1) {
+      const t = now(), w = windowHours * 3600;
+      const recent = S.usage.filter((u) => u.at >= t - w);
+      // 시뮬레이션은 방금 시작했으므로 실제 경과 시간으로 속도를 잡는다(창이 비면 0)
+      const span = Math.max(60, Math.min(w, t - (S.usage[0] ? S.usage[0].at : t)));
+      const rate = { calls: recent.length / span * 3600, tokens: recent.reduce((a, u) => a + u.input_tokens + u.output_tokens, 0) / span * 3600, cost_krw: recent.reduce((a, u) => a + u.cost_krw, 0) / span * 3600 };
+      const day = rangeStart('day'), month = rangeStart('month');
+      const spent = (since) => S.usage.filter((u) => u.at >= since).reduce((a, u) => a + u.cost_krw, 0);
+      const endDay = day + 86400;
+      const d = new Date(); const endMonth = new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime() / 1000;
+      const monthSpent = spent(month);
+      const b = S.budget;
+      const per = {};
+      for (const u of recent) (per[u.service_id] ||= { service_id: u.service_id, name: (S.services.find((s) => s.id === u.service_id) || {}).name, c: 0 }).c += u.cost_krw;
+      return {
+        window_hours: windowHours, rate_per_hour: rate,
+        projected: { end_of_day_cost_krw: spent(day) + rate.cost_krw * (endDay - t) / 3600, end_of_month_cost_krw: monthSpent + rate.cost_krw * (endMonth - t) / 3600 },
+        per_service: Object.values(per).map((p) => ({ service_id: p.service_id, name: p.name, rate_cost_krw_per_hour: p.c / span * 3600, projected_month_cost_krw: p.c / span * 3600 * (endMonth - t) / 3600 })),
+        budget: { monthly_budget_krw: b, hours_to_budget: b == null ? null : rate.cost_krw ? Math.max(0, (b - monthSpent) / rate.cost_krw) : null },
+        method: 'linear', note: '최근 창의 시간당 속도가 남은 기간 내내 유지된다고 가정한 단순 선형 추정입니다.',
+      };
+    }
+
+    // ---------- 청중 라이브(F절) ----------
+    const live = { calls: 0, ips: new Set() };
+    function liveChat({ key, message, ip = 'me' }) {
+      live.ips.add(ip);
+      if (provider.call(key === LEAKED_KEY ? LEAKED_KEY : key, 150) === 401) throw new HttpError(401, { error: 'revoked' });
+      live.calls++;
+      return { reply: reply(message), status: 200 };
+    }
+
+    function reply(msg) {
+      const m = (msg || '').trim();
+      const bank = [
+        '네, 요청하신 내용을 정리해 드릴게요. 핵심은 세 가지예요.',
+        '좋은 질문이에요! 간단히 말하면, 상황에 따라 다르지만 보통은 이렇게 해요.',
+        '알겠습니다. 요약하면 다음과 같아요: 먼저 목표를 정하고, 그다음 작게 시작하세요.',
+        '이건 데모용 모의 응답이에요. 실제 공급자를 연결하면 진짜 답변이 와요.',
+      ];
+      if (/안녕|hi|hello/i.test(m)) return '안녕하세요! 무엇을 도와드릴까요?';
+      return bank[(m.length + live.calls) % bank.length];
+    }
+
+    // ---------- 라우터: 실서버 경로를 그대로 받는다 ----------
+    function route(method, path, body) {
+      const [p, q] = path.split('?');
+      const qs = new URLSearchParams(q || '');
+      const id = (re) => { const m = p.match(re); return m && +m[1]; };
+      const need = (cond, status, error) => { if (!cond) throw new HttpError(status, { detail: error }); };
+
+      if (method === 'GET' && p === '/admin/dashboard') return dashboard();
+      if (method === 'GET' && p === '/admin/timeseries') return timeseries(+(qs.get('range') || 300));
+      if (method === 'GET' && p === '/admin/incidents') return [...S.incidents].reverse().map(incidentJson);
+      if (method === 'GET' && id(/^\/admin\/incidents\/(\d+)$/)) { const i = S.incidents.find((x) => x.id === id(/(\d+)$/)); need(i, 404, 'not found'); return incidentJson(i); }
+      if (method === 'GET' && p === '/admin/events') { const s = +(qs.get('since_id') || 0); return { events: S.events.filter((e) => e.id > s) }; }
+      if (method === 'GET' && p === '/admin/access-denied') return [...S.denied].reverse().slice(0, +(qs.get('limit') || 20)).map((d) => ({ ...d, at: iso(d.at) }));
+
+      if (method === 'GET' && p === '/admin/credentials') return S.creds.map(credOut);
+      if (method === 'POST' && p === '/admin/credentials') {
+        need(['PRIMARY', 'STANDBY'].includes(body.role), 400, 'invalid provider/role');
+        need((body.provider || 'mock') === 'mock', 400, `${body.provider}는 실서버 연결이 필요합니다`);
+        if (body.auth_mode === 'API_KEY') need(body.secret, 400, 'API_KEY needs secret');
+        else need(body.audience, 400, 'WIF needs audience');
+        need(!(body.role === 'PRIMARY' && primary()), 400, 'active PRIMARY already exists');
+        const c = { id: ++seq.cred, provider: 'mock', auth_mode: body.auth_mode, role: body.role, status: 'ACTIVE', key: body.secret || null,
+          masked: body.auth_mode === 'WIF' ? `wif:${body.audience}` : mask(body.secret), audience: body.audience || null,
+          ref: body.auth_mode === 'WIF' ? `wif:${body.audience}` : body.secret, replaced_by_id: null, created_at: iso(now()) };
+        S.creds.push(c); return credOut(c);
+      }
+      if (method === 'DELETE' && id(/^\/admin\/credentials\/(\d+)$/)) { const c = S.creds.find((x) => x.id === id(/(\d+)$/)); if (c) c.status = 'REVOKED'; return { ok: true }; }
+      if (method === 'POST' && /^\/admin\/(openrouter|openai)\/provision$/.test(p)) throw new HttpError(400, { detail: '시뮬레이션에서는 실제 공급자 키를 만들 수 없어요. 실서버에 연결하세요.' });
+
+      if (method === 'GET' && p === '/admin/settings') return { ...S.settings };
+      if (method === 'PUT' && p === '/admin/settings') {
+        for (const [k, v] of Object.entries(body)) { need(Number.isInteger(v) && v > 0, 400, `${k} must be > 0`); S.settings[k] = v; }
+        return { ...S.settings };
+      }
+      if (method === 'GET' && p === '/admin/cidrs') return S.cidrs.map((c) => ({ ...c }));
+      if (method === 'POST' && p === '/admin/cidrs') {
+        need(/^[\d.]+\/\d{1,2}$|^[0-9a-f:]+\/\d{1,3}$/i.test(body.cidr || ''), 400, 'invalid cidr');
+        const c = { id: ++seq.cidr, cidr: body.cidr, label: body.label || 'INTERNAL' }; S.cidrs.push(c); return c;
+      }
+      if (method === 'DELETE' && id(/^\/admin\/cidrs\/(\d+)$/)) { S.cidrs = S.cidrs.filter((c) => c.id !== id(/(\d+)$/)); return { ok: true }; }
+      if (method === 'GET' && p === '/admin/services') return S.services.map((s) => ({ ...s, tokens: S.tokens.filter((t) => t.service_id === s.id).map(({ token, ...t }) => t) }));
+      const sus = p.match(/^\/admin\/services\/(\d+)\/(suspend|resume)$/);
+      if (method === 'POST' && sus) { const s = S.services.find((x) => x.id === +sus[1]); need(s, 404, 'service not found'); s.status = sus[2] === 'suspend' ? 'SUSPENDED' : 'ACTIVE'; return { id: s.id, status: s.status }; }
+      if (method === 'POST' && p === '/admin/tokens') {
+        let s = S.services.find((x) => x.name === body.service_name);
+        if (!s) { s = { id: ++seq.svc, name: body.service_name, status: 'ACTIVE' }; S.services.push(s); }
+        const t = issue(s.id); return { id: t.id, service_id: s.id, token: t.token, token_masked: t.token_masked };
+      }
+      if (method === 'DELETE' && id(/^\/admin\/tokens\/(\d+)$/)) { const t = S.tokens.find((x) => x.id === id(/(\d+)$/)); if (t) t.status = 'REVOKED'; return { ok: true }; }
+      if (method === 'GET' && p === '/admin/honeykeys') return S.honeykeys.map((h) => ({ id: h.id, masked: h.masked, planted_at: h.planted_at, created_at: h.created_at, hits: S.hkEvents.filter((e) => e.honeykey_id === h.id).length }));
+
+      if (method === 'GET' && p === '/admin/trusted-identities') return S.trusted.map((r) => ({ ...r }));
+      if (method === 'POST' && p === '/admin/trusted-identities') {
+        const s = S.services.find((x) => x.id === body.service_id || x.name === body.service_name); need(s, 404, 'service not found');
+        const r = { id: ++seq.ti, issuer: body.issuer, subject_pattern: body.subject_pattern, audience: body.audience || null, service_id: s.id, jwks_uri: body.jwks_uri || null, created_at: iso(now()) };
+        S.trusted.push(r); return r;
+      }
+      if (method === 'DELETE' && id(/^\/admin\/trusted-identities\/(\d+)$/)) { S.trusted = S.trusted.filter((r) => r.id !== id(/(\d+)$/)); return { ok: true }; }
+      if (method === 'GET' && p === '/admin/wif/settings') return { wif_audience: S.wifAudience };
+      if (method === 'PUT' && p === '/admin/wif/settings') { need(body.wif_audience, 400, 'empty'); S.wifAudience = body.wif_audience; return { wif_audience: S.wifAudience }; }
+
+      if (method === 'GET' && p === '/admin/usage/summary') return usageSummary(qs.get('range') || 'day');
+      if (method === 'GET' && p === '/admin/usage/forecast') return usageForecast(+(qs.get('window_hours') || 1));
+      if (method === 'GET' && p === '/admin/usage/budget') return { monthly_budget_krw: S.budget };
+      if (method === 'PUT' && p === '/admin/usage/budget') { const b = body.monthly_budget_krw; need(b == null || (Number.isInteger(b) && b > 0), 400, 'invalid'); S.budget = b; return { monthly_budget_krw: b }; }
+
+      if (method === 'POST' && p === '/demo/reset') { attackStop('리셋'); return reset(); }
+      if (method === 'POST' && p === '/demo/attack/start') { attackStart(); return { attack_running: S.attack }; }
+      if (method === 'POST' && p === '/demo/attack/stop') { attackStop('공격 수동 종료'); return { attack_running: S.attack }; }
+      if (method === 'POST' && p === '/demo/honeypot/hit') {
+        const hk = S.honeykeys[0]; need(hk, 409, 'honeykey 없음');
+        try { gatewayCall({ token: hk.value, ip: '203.0.113.77' }); } catch (e) { return { source_ip: '203.0.113.77', planted_at: hk.planted_at, status_code: e.status, response: e.body }; }
+      }
+      if (method === 'POST' && p === '/demo/wif/seed') {
+        const s = S.services.find((x) => x.name === '직원A'); need(s, 404, '먼저 /demo/reset');
+        const issuer = 'http://localhost:8000/idp';
+        const r = S.trusted.find((x) => x.issuer === issuer && x.subject_pattern === 'repo:november/*');
+        if (r) { r.service_id = s.id; return { ...r }; }
+        return route('POST', '/admin/trusted-identities', { issuer, subject_pattern: 'repo:november/*', service_id: s.id });
+      }
+      if (method === 'POST' && p === '/demo/wif/token') {
+        const sub = (body && body.sub) || 'repo:november/app:ref:refs/heads/main';
+        const enc = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/=+$/, '');
+        const token = `${enc({ alg: 'RS256', kid: 'local-1' })}.${enc({ sub, aud: S.wifAudience, exp: Math.round(now() + 600) })}.${rnd(43)}`;
+        S.jwts[token] = { sub, exp: now() + 600 };
+        return { token, expires_in: 600 };
+      }
+      if (method === 'POST' && p === '/v1/chat/completions') return gatewayCall(body);
+      if (method === 'GET' && p === '/live/config') return { key: LEAKED_KEY, model: 'openai/gpt-4o-mini' };
+      if (method === 'POST' && p === '/live/chat') return liveChat(body);
+      if (method === 'GET' && p === '/live/stats') return { participants: live.ips.size, calls: live.calls, key_status: provider.revoked.has(LEAKED_KEY) ? 'revoked' : 'active', updated_at: Math.round(now()) };
+      throw new HttpError(404, { detail: `sim: ${method} ${p} 없음` });
+    }
+
+    function credOut(c) {
+      return { id: c.id, provider: c.provider, auth_mode: c.auth_mode, role: c.role, status: c.status, masked: c.masked, audience: c.audience,
+        provider_ref_masked: mask(c.ref), replaced_by_id: c.replaced_by_id, created_at: c.created_at };
+    }
+
+    reset();
+    setInterval(() => { try { tick(); } catch (e) { console.error(e); } }, POLL_S * 1000);
+
+    return {
+      request(method, path, body, headers) {
+        // 출발 IP 흉내(DEMO_MODE의 X-Demo-Source-IP)
+        if (path.startsWith('/v1/')) body = { ...body, token: (headers.Authorization || '').replace(/^Bearer\s+/i, ''), ip: headers['X-Demo-Source-IP'] || '127.0.0.1', message: ((body.messages || []).slice(-1)[0] || {}).content || '' };
+        return clone(route(method, path, body || {}));
       },
-      seek(t) { // 되감기 = 리셋 후 빨리감기 (결정적 세계라 결과가 같다)
-        const was = d.playing; d.reset(); d.playing = false;
-        d.step(Math.max(0, Math.min(t, d.duration)));
-        d.playing = was;
-      },
-      scene() { const t = d.world.t; return SCENES.find((s) => t >= s.start && t < s.end) || SCENES[SCENES.length - 1]; },
+      provider, // 청중 페이지 시뮬레이션용
+      LEAKED_KEY,
     };
-    d.reset();
-    return d;
   }
 
-  global.Sim = { C, costOf, createWorld, seed, createDirector, SCENES, DURATION, cidrContains, maskKey };
-})(typeof window !== 'undefined' ? window : globalThis);
+  global.SimWorld = World;
+  global.SimHttpError = HttpError;
+})(window);

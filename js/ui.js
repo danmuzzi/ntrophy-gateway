@@ -1,212 +1,221 @@
-/* =====================================================================
- * ui.js — 두 화면이 같이 쓰는 그리기 도구 (데이터는 모름, 받은 것만 그림)
- *   - 포맷터, 애니메이션 루프, 숫자 트윈, 누적 2선 차트, 차액 게이지, 토스트
- * 녹화 모드: window.__advance(dt) 로 한 프레임씩 진행 (영상 제작용)
- * ===================================================================== */
+/* ui.js — 세 화면이 같이 쓰는 도구: 아이콘, 포맷, 토스트, 시트, 차트 */
 (function (global) {
   'use strict';
 
-  const KST = new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-  const UI = {};
+  const $ = (s, el = document) => el.querySelector(s);
+  const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  UI.krw = (n) => Math.round(n || 0).toLocaleString('ko-KR');
-  UI.time = (iso) => (iso ? KST.format(new Date(iso)) : '—');
-  UI.timeMs = (iso) => {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    return KST.format(d) + '.' + String(Math.floor(d.getMilliseconds() / 100));
+  // ---------- 아이콘 (24px, 2px 선) ----------
+  const P = {
+    home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+    chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+    key: '<circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 9.2-9.2M17 6l3 3M14 9l2 2"/>',
+    shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+    alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
+    bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+    check: '<path d="m5 12 5 5L20 7"/>',
+    x: '<path d="M6 6l12 12M18 6 6 18"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+    play: '<path d="M7 4v16l13-8z"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/>',
+    users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.3-5 6.5-5s5.7 1.5 6.5 5M16 4.5a3.5 3.5 0 0 1 0 7M18 15c2 .6 3.2 2.2 3.5 5"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9"/>',
+    lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+    honey: '<path d="M12 2 20 6.5v9L12 20l-8-4.5v-9z"/><path d="M12 8v4M12 15h.01"/>',
+    swap: '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
+    bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/>',
+    link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+    plug: '<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5"/>',
+    send: '<path d="M4 12 20 4l-6 16-3-7z"/>',
+    chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
+    trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+    pause: '<path d="M8 5v14M16 5v14"/>',
+    target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    id: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2.5"/><path d="M14 10h4M14 14h3"/>',
+    wallet: '<path d="M3 7a2 2 0 0 1 2-2h13v4"/><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="16.5" cy="13.5" r="1.2"/>',
+    arrow: '<path d="M9 6l6 6-6 6"/>',
+    external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5"/>',
   };
-  UI.esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  UI.$ = (sel, root = document) => root.querySelector(sel);
-  UI.$$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const icon = (n, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${P[n] || ''}</svg>`;
 
-  UI.STATUS = {
-    NORMAL:    { label: '정상',     tone: 'ok',   line: '게이트웨이 기록과 공급자 보고가 일치합니다' },
-    SUSPECT:   { label: '의심',     tone: 'warn', line: '설명되지 않는 사용량이 보입니다' },
-    WARNING:   { label: '경고',     tone: 'warn', line: '차액이 한도의 50%를 넘었습니다. 70%에서 자동 차단합니다' },
-    BLOCKED:   { label: '차단',     tone: 'bad',  line: '무단 사용을 차단하고 인증정보를 교체하는 중입니다' },
-    RECOVERED: { label: '복구됨',   tone: 'ok',   line: '유출 키를 폐기하고 예비 키로 정상 운영 중입니다' },
+  // ---------- 포맷 ----------
+  const nf = new Intl.NumberFormat('ko-KR');
+  const n = (v, d = 0) => (v == null || Number.isNaN(+v) ? '—' : nf.format(+(+v).toFixed(d)));
+  const won = (v) => (v == null ? '—' : `${nf.format(Math.round(v))}원`);
+  const time = (isoStr, sec = true) => {
+    if (!isoStr) return '—';
+    const d = new Date(isoStr);
+    return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', ...(sec ? { second: '2-digit' } : {}), hour12: false });
+  };
+  const ago = (isoStr) => {
+    const s = Math.max(0, (Date.now() - new Date(isoStr)) / 1000);
+    if (s < 10) return '방금';
+    if (s < 60) return `${Math.floor(s)}초 전`;
+    if (s < 3600) return `${Math.floor(s / 60)}분 전`;
+    return time(isoStr, false);
   };
 
-  // ---- 루프 -------------------------------------------------------------
-  const Loop = { fns: [], manual: false, last: null };
-  Loop.add = (fn) => Loop.fns.push(fn);
-  Loop.run = async (dt) => { for (const fn of Loop.fns) await fn(dt); };
-  function frame(ts) {
-    if (!Loop.manual) {
-      const dt = Loop.last == null ? 0 : Math.min(0.1, (ts - Loop.last) / 1000);
-      Loop.last = ts;
-      Loop.run(dt);
-    }
-    requestAnimationFrame(frame);
+  // ---------- 토스트 ----------
+  function toast(msg, kind = 'info', ms = 3200) {
+    let host = $('.toasts');
+    if (!host) { host = document.createElement('div'); host.className = 'toasts'; host.setAttribute('role', 'status'); document.body.append(host); }
+    const ic = { ok: 'check', warn: 'alert', bad: 'ban', info: 'bell' }[kind] || 'bell';
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.innerHTML = `<span class="t-ic">${icon(ic)}</span><span>${esc(msg)}</span>`;
+    host.append(el);
+    while (host.children.length > 3) host.firstChild.remove();
+    setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, ms);
   }
-  requestAnimationFrame(frame);
-  UI.Loop = Loop;
 
-  // 녹화: CSS 애니메이션까지 dt만큼만 진행시키고 한 프레임 그림
-  global.__advance = async (dt) => {
-    Loop.manual = true;
-    for (const a of document.getAnimations()) {
-      if (a.playState !== 'paused') a.pause();
-      const cur = Number(a.currentTime) || 0;
-      a.currentTime = cur + dt * 1000;
-    }
-    await Loop.run(dt);
-    for (const a of document.getAnimations()) if (a.playState !== 'paused') a.pause();
-  };
-
-  // ---- 숫자 트윈 ----------------------------------------------------------
-  UI.tween = function (el, { format = UI.krw, speed = 9 } = {}) {
-    const st = { el, cur: 0, target: 0, init: false };
-    st.set = (v) => { st.target = v; if (!st.init) { st.cur = v; st.init = true; el.textContent = format(v); } };
-    st.step = (dt) => {
-      if (Math.abs(st.target - st.cur) < 0.5) st.cur = st.target;
-      else st.cur += (st.target - st.cur) * Math.min(1, dt * speed);
-      el.textContent = format(st.cur);
-    };
-    return st;
-  };
-
-  // ---- 누적 2선 차트 (게이트웨이 기록 vs 공급자 보고) -----------------------
-  // points: [{t(초), gateway_cost_krw, provider_cost_krw}]  — 마지막 점이 "지금"
-  UI.chart = function (host, { windowSec = 90, height = 260, compact = false, clockLabels = false } = {}) {
-    const NS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(NS, 'svg');
-    svg.setAttribute('class', 'chart-svg');
-    svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', '게이트웨이 기록과 공급자 보고 누적 비용 추이');
-    host.appendChild(svg);
-    const st = { yMax: 1000 };
-
-    function nice(v) {
-      const p = Math.pow(10, Math.floor(Math.log10(Math.max(v, 1))));
-      for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
-      return 10 * p;
-    }
-    st.draw = function (points, dt = 0.016, mark) {
-      const W = host.clientWidth || 600, H = typeof height === 'function' ? height() : height;
-      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-      svg.setAttribute('width', W); svg.setAttribute('height', H);
-      const padL = compact ? 46 : 64, padR = compact ? 12 : 18, padT = 14, padB = 26;
-      if (!points.length) { svg.innerHTML = ''; return; }
-      // live 백엔드가 t(초)를 안 주면 at(ISO)에서 계산
-      points = points.map((p) => (p.t != null ? p : { ...p, t: Date.parse(p.at) / 1000 }));
-      const tNow = points[points.length - 1].t;
-      const t0 = tNow - windowSec;
-      const vis = points.filter((p) => p.t >= t0 - 3);
-      const maxV = Math.max(...vis.map((p) => Math.max(p.gateway_cost_krw, p.provider_cost_krw)), 1000);
-      const targetMax = nice(maxV * 1.15);
-      st.yMax = targetMax; // 눈금이 항상 깔끔한 값이 되도록 즉시 맞춤
-      const x = (t) => padL + ((t - t0) / windowSec) * (W - padL - padR);
-      const y = (v) => H - padB - (v / st.yMax) * (H - padT - padB);
-
-      let g = '';
-      // 가로 눈금
-      const ticks = 4;
-      for (let i = 0; i <= ticks; i++) {
-        const v = (st.yMax / ticks) * i;
-        g += `<line class="grid" x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`;
-        g += `<text class="axis" x="${padL - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v >= 10000 ? (v / 10000).toLocaleString('ko-KR', { maximumFractionDigits: 1 }) + '만' : UI.krw(v)}</text>`;
-      }
-      // 세로 눈금(30초)
-      const nowAt = points[points.length - 1].at;
-      const step = windowSec > 100 ? 30 : 15;
-      for (let s = Math.max(0, Math.ceil(t0 / step) * step); s <= tNow; s += step) {
-        const label = clockLabels && nowAt
-          ? UI.time(new Date(Date.parse(nowAt) - (tNow - s) * 1000).toISOString())
-          : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-        g += `<text class="axis" x="${x(s).toFixed(1)}" y="${H - 6}" text-anchor="middle">${label}</text>`;
-      }
-      const clip = vis.map((p) => ({ X: Math.max(padL, x(p.t)), G: y(p.gateway_cost_krw), P: y(p.provider_cost_krw) }));
-      // 차액 영역 (공급자 > 게이트웨이) = 설명되지 않는 사용량
-      if (clip.length > 1) {
-        let area = `M${clip[0].X.toFixed(1)},${clip[0].P.toFixed(1)}`;
-        clip.forEach((c) => (area += ` L${c.X.toFixed(1)},${Math.min(c.P, c.G).toFixed(1)}`));
-        for (let i = clip.length - 1; i >= 0; i--) area += ` L${clip[i].X.toFixed(1)},${clip[i].G.toFixed(1)}`;
-        g += `<path class="gap" d="${area} Z"/>`;
-      }
-      const line = (key) => clip.map((c, i) => `${i ? 'L' : 'M'}${c.X.toFixed(1)},${c[key].toFixed(1)}`).join(' ');
-      g += `<path class="ln ln-pv" d="${line('P')}"/>`;
-      g += `<path class="ln ln-gw" d="${line('G')}"/>`;
-      const last = clip[clip.length - 1];
-      g += `<circle class="dot-pv" cx="${last.X.toFixed(1)}" cy="${last.P.toFixed(1)}" r="4"/>`;
-      g += `<circle class="dot-gw" cx="${last.X.toFixed(1)}" cy="${last.G.toFixed(1)}" r="4"/>`;
-      // 차단 시점 표시
-      if (mark && mark.t >= t0) {
-        g += `<line class="mark" x1="${x(mark.t).toFixed(1)}" x2="${x(mark.t).toFixed(1)}" y1="${padT}" y2="${H - padB}"/>`;
-        g += `<text class="mark-t" x="${(x(mark.t) - 6).toFixed(1)}" y="${padT + 12}" text-anchor="end">${UI.esc(mark.label)}</text>`;
-      }
-      // 끝점 라벨
-      const gap = last.G - last.P;
-      if (!compact || gap > 18) {
-        const lp = Math.min(last.P, last.G - 16);
-        g += `<text class="end-pv" x="${(last.X - 8).toFixed(1)}" y="${(lp - 8).toFixed(1)}" text-anchor="end">공급자 보고</text>`;
-        g += `<text class="end-gw" x="${(last.X - 8).toFixed(1)}" y="${(Math.max(last.G, lp + 18) + 18).toFixed(1)}" text-anchor="end">게이트웨이 기록</text>`;
-      }
-      svg.innerHTML = g;
-    };
-    return st;
-  };
-
-  // ---- 차액 게이지 -------------------------------------------------------
-  // 눈금: 의심 10%, 경고 50%, 차단 70%, 한도 100%. 막대 길이 = 차액 / 한도
-  UI.gauge = function (host, { compact = false } = {}) {
-    host.classList.add('gauge');
-    if (compact) host.classList.add('gauge--compact');
-    host.innerHTML = `
-      <div class="gauge-track">
-        <div class="gauge-zone z-suspect"></div><div class="gauge-zone z-warn"></div><div class="gauge-zone z-block"></div>
-        <div class="gauge-ghost" hidden></div>
-        <div class="gauge-fill"></div>
-        <div class="gauge-tick" style="left:10%"></div>
-        <div class="gauge-tick t-warn" style="left:50%"></div>
-        <div class="gauge-tick t-block" style="left:70%"></div>
-      </div>
-      <div class="gauge-scale">
-        <span style="left:10%">의심 10%</span>
-        <span style="left:50%">경고 50%</span>
-        <span style="left:70%">차단 70%</span>
-        <span style="left:100%">한도</span>
-      </div>`;
-    const fill = host.querySelector('.gauge-fill');
-    const ghost = host.querySelector('.gauge-ghost');
-    const st = { cur: 0, target: 0 };
-    st.set = (ratio, tone, ghostRatio) => {
-      st.target = Math.max(0, Math.min(1.05, ratio));
-      host.dataset.tone = tone;
-      if (ghostRatio != null) { ghost.hidden = false; ghost.style.width = (Math.min(1, ghostRatio) * 100).toFixed(2) + '%'; }
-      else ghost.hidden = true;
-    };
-    st.step = (dt) => {
-      st.cur += (st.target - st.cur) * Math.min(1, dt * 6);
-      fill.style.width = (st.cur * 100).toFixed(2) + '%';
-    };
-    return st;
-  };
-
-  // ---- 토스트 ------------------------------------------------------------
-  UI.toaster = function (host) {
-    return {
-      push(e) {
-        const el = document.createElement('div');
-        el.className = `toast toast--${e.level}`;
-        el.setAttribute('role', e.level === 'danger' ? 'alert' : 'status');
-        el.innerHTML = `<strong>${UI.esc(e.title)}</strong><span>${UI.esc(e.message)}</span>`;
-        host.prepend(el);
-        el.dataset.born = String(Date.now());
-        while (host.children.length > 3) host.lastChild.remove();
-        el._life = 5.5;
-        return el;
-      },
-      step(dt) {
-        for (const el of Array.from(host.children)) {
-          el._life = (el._life ?? 5.5) - dt;
-          if (el._life < 0.4) el.classList.add('is-leaving');
-          if (el._life <= 0) el.remove();
-        }
+  // ---------- 시트(데스크톱 모달 · 모바일 바텀시트) ----------
+  let openSheet = null;
+  function sheet({ title, desc = '', body = '', wide = false, onMount, onClose }) {
+    closeSheet();
+    const scrim = document.createElement('div');
+    scrim.className = 'scrim';
+    scrim.innerHTML = `<div class="sheet ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+      <div class="grabber"></div>
+      <div class="sheet-h"><div><h2>${title}</h2>${desc ? `<p>${desc}</p>` : ''}</div>
+      <button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+      <div class="sheet-b">${body}</div></div>`;
+    document.body.append(scrim);
+    document.body.style.overflow = 'hidden';
+    requestAnimationFrame(() => scrim.classList.add('on'));
+    const api = {
+      el: $('.sheet', scrim),
+      close() {
+        if (openSheet !== api) return;
+        openSheet = null;
+        scrim.classList.remove('on');
+        document.body.style.overflow = '';
+        setTimeout(() => scrim.remove(), 260);
+        onClose && onClose();
       },
     };
-  };
+    scrim.addEventListener('click', (e) => { if (e.target === scrim || e.target.closest('[data-close]')) api.close(); });
+    openSheet = api;
+    onMount && onMount(api.el, api);
+    const f = $('input,select,textarea', api.el);
+    if (f && matchMedia('(min-width: 861px)').matches) setTimeout(() => f.focus(), 80);
+    return api;
+  }
+  function closeSheet() { openSheet && openSheet.close(); }
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
-  global.UI = UI;
+  function confirmSheet({ title, desc, ok = '확인', danger = false }) {
+    return new Promise((resolve) => {
+      let done = false;
+      sheet({
+        title, desc,
+        body: `<div class="sheet-f"><button class="btn gray" data-close>취소</button><button class="btn ${danger ? 'danger' : ''}" data-ok>${ok}</button></div>`,
+        onMount(el, s) { $('[data-ok]', el).onclick = () => { done = true; resolve(true); s.close(); }; },
+        onClose() { if (!done) resolve(false); },
+      });
+    });
+  }
+
+  async function copy(text) {
+    try { await navigator.clipboard.writeText(text); toast('복사했어요', 'ok', 1600); }
+    catch { toast('복사하지 못했어요. 직접 선택해 주세요', 'warn'); }
+  }
+
+  // ---------- 두 선 차트 (게이트웨이 vs 공급자, 호출 수) ----------
+  // 축 하나, 2px 선, 4개 이하 시리즈라 끝에 직접 라벨, 크로스헤어 툴팁
+  function lineChart(host, { series, refY, refLabel, fmt = (v) => n(v), xfmt = (t) => time(t, false) }) {
+    const W = host.clientWidth || 600, H = host.clientHeight || 240;
+    const m = { l: 40, r: 64, t: 14, b: 26 };
+    const pts = series[0].points;
+    if (!pts.length) { host.innerHTML = `<div class="empty">${icon('chart')}데이터가 아직 없어요</div>`; return; }
+    const xs = pts.map((p) => +new Date(p.t));
+    const x0 = xs[0], x1 = xs[xs.length - 1] || x0 + 1;
+    const maxV = Math.max(4, refY || 0, ...series.flatMap((s) => s.points.map((p) => p.v)));
+    const niceMax = (() => { const p = 10 ** Math.floor(Math.log10(maxV)); return Math.ceil(maxV / p * 1.1) * p; })();
+    const X = (t) => m.l + (W - m.l - m.r) * ((t - x0) / Math.max(1, x1 - x0));
+    const Y = (v) => H - m.b - (H - m.t - m.b) * (v / niceMax);
+    const path = (ps) => ps.map((p, i) => `${i ? 'L' : 'M'}${X(+new Date(p.t)).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => niceMax * f);
+    const xt = [0, 0.5, 1].map((f) => x0 + (x1 - x0) * f);
+    if (x1 - x0 < 180000) xfmt = (t) => time(t); // 3분 미만이면 초까지
+
+    const [gw, pv] = series;
+    // 두 선 사이 간격(공급자가 위) — 설명되지 않는 호출을 빨간 면으로
+    const gap = pv && gw ? `M${pv.points.map((p, i) => `${X(+new Date(p.t)).toFixed(1)},${Y(Math.max(p.v, gw.points[i].v)).toFixed(1)}`).join('L')}L${[...gw.points].reverse().map((p) => `${X(+new Date(p.t)).toFixed(1)},${Y(p.v).toFixed(1)}`).join('L')}Z` : '';
+    const lastY = series.map((s) => Y(s.points[s.points.length - 1].v));
+    if (lastY.length === 2 && Math.abs(lastY[0] - lastY[1]) < 14) { // 끝 라벨 겹침 방지
+      const mid = (lastY[0] + lastY[1]) / 2, up = lastY[0] <= lastY[1] ? 0 : 1;
+      lastY[up] = mid - 8; lastY[1 - up] = mid + 8;
+    }
+
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="게이트웨이 기록과 공급자 보고 누적 호출 수">
+      ${ticks.map((v) => `<line class="grid-l" x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"/><text class="axis-t" x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${fmt(v)}</text>`).join('')}
+      ${xt.map((t, i) => `<text class="axis-t" x="${X(t)}" y="${H - 6}" text-anchor="${['start', 'middle', 'end'][i]}">${xfmt(new Date(t).toISOString())}</text>`).join('')}
+      ${gap ? `<path class="gap" d="${gap}"/>` : ''}
+      ${refY ? `<line class="ref" x1="${m.l}" x2="${W - m.r}" y1="${Y(refY)}" y2="${Y(refY)}"/><text class="ref-t" x="${W - m.r - 4}" y="${Y(refY) - 6}" text-anchor="end">${esc(refLabel || '')}</text>` : ''}
+      ${series.map((s) => `<path class="ln ${s.cls}" d="${path(s.points)}"/>`).join('')}
+      ${series.map((s, i) => `<text class="end-l" x="${W - m.r + 8}" y="${lastY[i] + 4}">${fmt(s.points[s.points.length - 1].v)}</text>`).join('')}
+      <g class="hover" style="display:none"><line class="xh" y1="${m.t}" y2="${H - m.b}"/>${series.map((s) => `<circle class="dot ${s.cls}" r="5"/>`).join('')}</g>
+    </svg><div class="tip"></div>`;
+
+    const svg = $('svg', host), hv = $('.hover', host), tip = $('.tip', host);
+    const move = (clientX) => {
+      const r = svg.getBoundingClientRect();
+      const px = (clientX - r.left) * (W / r.width);
+      const t = x0 + (px - m.l) / (W - m.l - m.r) * (x1 - x0);
+      let i = 0, best = Infinity;
+      xs.forEach((x, k) => { const d = Math.abs(x - t); if (d < best) { best = d; i = k; } });
+      const cx = X(xs[i]);
+      hv.style.display = '';
+      $('.xh', hv).setAttribute('x1', cx); $('.xh', hv).setAttribute('x2', cx);
+      $$('circle', hv).forEach((c, k) => { c.setAttribute('cx', cx); c.setAttribute('cy', Y(series[k].points[i].v)); });
+      const diff = pv && gw ? Math.max(0, pv.points[i].v - gw.points[i].v) : null;
+      tip.innerHTML = `<b>${time(pts[i].t)}</b>${series.map((s) => `<div><span><i class="swatch ${s.cls}"></i>${s.label}</span><span>${fmt(s.points[i].v)}</span></div>`).join('')}${diff != null ? `<div><span>차이</span><span>${fmt(diff)}</span></div>` : ''}`;
+      tip.style.left = `${Math.min(Math.max(cx / W * r.width, 90), r.width - 90)}px`;
+      tip.style.top = `${Math.min(...series.map((s) => Y(s.points[i].v))) / H * r.height}px`;
+      tip.classList.add('on');
+    };
+    const leave = () => { hv.style.display = 'none'; tip.classList.remove('on'); };
+    svg.addEventListener('pointermove', (e) => move(e.clientX));
+    svg.addEventListener('pointerleave', leave);
+    svg.addEventListener('pointerdown', (e) => move(e.clientX));
+  }
+
+  // 숫자가 부드럽게 바뀌도록
+  function tween(el, to, fmt = (v) => n(v), ms = 500) {
+    const from = +(el.dataset.v || 0);
+    el.dataset.v = to;
+    if (from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) { el.textContent = fmt(to); return; }
+    const t0 = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / ms), e = 1 - (1 - k) ** 3;
+      el.textContent = fmt(from + (to - from) * e);
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  // 테마 전환(시스템 → 라이트 → 다크)
+  function initTheme() {
+    let t = null;
+    try { t = localStorage.getItem('ng.theme'); } catch { /* 무시 */ }
+    if (t) document.documentElement.dataset.theme = t;
+  }
+  function toggleTheme() {
+    const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('ng.theme', next); } catch { /* 무시 */ }
+    return next;
+  }
+  initTheme();
+
+  global.UI = { $, $$, esc, icon, n, won, time, ago, toast, sheet, closeSheet, confirmSheet, copy, lineChart, tween, toggleTheme };
 })(window);
