@@ -1,10 +1,11 @@
 /* employee.js — 직원 채팅 페이지 (docs/demo-page-spec.md 페이지 B)
  * 게이트웨이 POST /v1/chat/completions 를 직원 토큰으로 부른다.
- * 장면 5에서 청중 화면은 차단되는 동안 이 화면은 예비 키로 계속 응답받는 걸 보여 준다. */
+ * 장면 5에서 공격자 화면은 차단되는 동안 이 화면은 예비 키로 계속 응답받는 걸 보여 준다. */
 (function () {
   'use strict';
   const { $, $$, esc, icon, toast } = UI;
 
+  const hist = []; // 이전 대화(모델에 문맥으로 전달)
   const st = { who: null, ip: '', busy: false, key: null, sim: false, tokens: [] };
   const msgs = $('#msgs'), input = $('#input');
   $('#send').innerHTML = icon('send');
@@ -40,7 +41,8 @@
     input.value = ''; autosize(); count();
     const typing = add('ai', '<span class="typing"><i></i><i></i><i></i></span>');
     try {
-      const r = await API.chat({ token: tok, message: text, ip: st.ip || undefined });
+      const r = await API.chat({ token: tok, message: text, history: hist.slice(-10), ip: st.ip || undefined });
+      hist.push({ role: 'user', content: text }, { role: 'assistant', content: r.choices[0].message.content });
       await refreshKey();
       typing.innerHTML = `${esc(r.choices[0].message.content)}<span class="msg-meta">200 · ${r.usage ? r.usage.total_tokens : '?'} 토큰${st.key ? ` · ${esc(st.key)}` : ''}</span>`;
       code(200, '200 정상');
@@ -81,7 +83,7 @@
     const next = r && r.tokens ? Object.entries(r.tokens) : [];
     if (JSON.stringify(next) === JSON.stringify(st.tokens)) return;
     const first = !st.tokens.length && !msgs.children.length;
-    st.tokens = next;
+    st.tokens = next; hist.length = 0;
     if (!st.tokens.some(([name]) => name === st.who)) st.who = st.tokens.length ? st.tokens[0][0] : null;
     renderWho();
     if (!first && next.length) add('sys', '콘솔에서 데모를 초기화해 새 토큰으로 바꿨어요');

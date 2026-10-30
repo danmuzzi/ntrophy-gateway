@@ -22,6 +22,7 @@
   };
   const STEP = {
     DETECTED: '유출 탐지', REVOKE_PROVIDER_KEY: '공급자 키 폐기', PROMOTE_STANDBY: '예비 키 승격',
+    REVOKE_ALL_TOKENS: '전체 토큰 폐기', SUSPEND_SERVICES: '서비스 일시 정지',
     NOTIFY_ADMIN: '관리자 통보', VERIFIED: '전환 키 호출 확인',
   };
   const STEP_ORDER = ['DETECTED', 'REVOKE_PROVIDER_KEY', 'PROMOTE_STANDBY', 'NOTIFY_ADMIN', 'VERIFIED'];
@@ -91,7 +92,7 @@
             <div class="kpi"><div class="kpi-l">${icon('key', 'width="14" height="14"')}사용 중인 키</div><div class="kpi-v sm mono" id="kKey">—</div><div class="kpi-s" id="kKeyS">&nbsp;</div></div>
             <div class="kpi"><div class="kpi-l">${icon('target', 'width="14" height="14"')}자동 차단선</div><div class="kpi-v num" id="kBlock">—</div><div class="kpi-s" id="kLimit">&nbsp;</div></div>
           </div>
-          <div class="callout" id="attackNote" hidden>${icon('bolt')}<span>공격 시뮬레이터가 유출 키로 공급자를 직접 호출하고 있어요 (게이트웨이 우회)</span></div>
+          <div class="callout" id="attackNote" hidden>${icon('bolt')}<span>공격자가 유출 키로 공급자를 직접 호출하고 있어요 (게이트웨이 우회)</span></div>
         </div>
       </section>
 
@@ -148,7 +149,7 @@
     const inc = st.incident && st.incident.id === d.incident_id ? st.incident : null;
     const val = blocked && inc ? (inc.loss_calls ?? 0) : activeDiff(d);
     tween($('#hNum'), val);
-    const over = val > d.limit_calls; // 최종 손실은 한도를 넘을 수 있다(청중이 빠르거나 공급자 지연이 클 때)
+    const over = val > d.limit_calls; // 최종 손실은 한도를 넘을 수 있다(공격자가 빠르거나 공급자 지연이 클 때)
     $('#hOf').innerHTML = `/ 한도 ${n(d.limit_calls)}건${over ? ` <span class="badge bad">${n(val - d.limit_calls)}건 초과</span>` : ''}`;
     $('#hLabel').innerHTML = blocked ? `${icon('ban', 'width="16" height="16"')}차단까지 새어 나간 호출` : `${icon('alert', 'width="16" height="16"')}게이트웨이가 모르는 호출`;
     const [sr, wr, br] = ratiosOf(d);
@@ -212,7 +213,7 @@
     host.innerHTML = items.map((e) => {
       const [k, ic] = EVENT[e.kind] || ['gray', 'bell'];
       return `<div class="row"><div class="row-ic sm ${k}">${icon(ic)}</div><div class="row-b"><div class="row-t"><span>${esc(e.message)}</span></div></div><time>${ago(e.at)}</time></div>`;
-    }).join('') || `<div class="empty">${icon('bell')}아직 알림이 없어요<br><span style="font-size:13px">우측 상단 ‘데모 제어’에서 시나리오를 시작해 보세요</span></div>`;
+    }).join('') || `<div class="empty">${icon('bell')}아직 알림이 없어요<br><span style="font-size:13px">유출 징후가 보이면 여기에 바로 알려 드려요</span></div>`;
   }
 
   // ================= 사용량 =================
@@ -283,7 +284,7 @@
         <div class="bl">${esc(s.name || '알 수 없음')}</div><div class="bv num">${won(s.cost_krw)}</div>
         <div class="bar-track"><div class="bar-fill" style="width:${s.cost_krw / max * 100}%"></div></div>
         <div class="bs">호출 ${n(s.calls)}건 · 토큰 ${n(s.input_tokens + s.output_tokens)} · ${s.models.map((m) => esc(m.model)).join(', ')}</div></div>`).join('')
-        || `<div class="empty">${icon('chart')}이 기간에는 호출이 없어요<br><span style="font-size:13px">데모 제어에서 ‘직원 정상 호출’을 켜 보세요</span></div>`;
+        || `<div class="empty">${icon('chart')}이 기간에는 호출이 없어요<br><span style="font-size:13px">직원이 게이트웨이를 쓰면 여기에 집계돼요</span></div>`;
       $$('#uBars [data-svc]').forEach((el) => { el.onclick = () => modelSheet(sum.services.find((s) => s.service_id === +el.dataset.svc)); });
       $('#uPer').innerHTML = fc.per_service.map((p) => `<div class="row"><div class="row-b"><div class="row-t"><span>${esc(p.name)}</span></div><div class="row-s">${won(p.rate_cost_krw_per_hour)}/시간</div></div><div class="row-e"><b class="num">${won(p.projected_month_cost_krw)}</b></div></div>`).join('')
         || `<div class="empty" style="padding:16px">최근 1시간 호출이 없어요</div>`;
@@ -424,7 +425,7 @@
       toast(`${provider} 키를 만드는 중이에요…`, 'info');
       const r = await API.provision(provider, { role, limit_usd: 0.5 });
       loadCreds();
-      if (r.leaked_key) secretSheet('주 키를 만들었어요', '청중 데모에서 “유출된 키”로 쓰여요. 지금 한 번만 보여 드려요.', r.leaked_key);
+      if (r.leaked_key) secretSheet('주 키를 만들었어요', '공격자 화면에서 ‘유출된 키’로 쓰여요. 지금 한 번만 보여 드려요.', r.leaked_key);
       else toast(`${r.masked} 예비 키를 만들었어요`, 'ok');
     } catch (e) { toast(e.message, 'bad'); }
   }
@@ -444,7 +445,7 @@
     v.innerHTML = `
       <section class="grid g-2">
         <div class="card">
-          <div class="card-h"><div><h2>허용 IP 대역</h2><p>여기에 없는 곳에서 온 호출은 403으로 막아요. 0개면 전부 막아요.</p></div></div>
+          <div class="card-h"><div><h2>허용 IP 대역</h2><p>여기에 없는 곳에서 온 호출은 403으로 막아요. 0개면 모두 허용해요.</p></div></div>
           <div class="list" id="cidrList"></div>
           <form class="inline-form" id="cidrForm" style="margin-top:14px">
             <input class="input mono" name="cidr" placeholder="10.20.0.0/16" required aria-label="CIDR">
@@ -464,7 +465,7 @@
           <p class="muted" style="font-size:12px;margin:12px 0 0" id="wifAud"></p>
         </div>
         <div class="card">
-          <div class="card-h"><div><h2>허니키</h2><p>일부러 흘려 둔 가짜 토큰이에요. 쓰이면 그 IP를 10분간 막아요.</p></div></div>
+          <div class="card-h"><div><h2>허니키</h2><p>일부러 흘려 둔 가짜 토큰이에요. 쓰이면 전체 API 토큰을 즉시 폐기하고 서비스를 일시 정지해요.</p></div></div>
           <div class="list" id="hkList"></div>
           <div id="blockedIps"></div>
         </div>
@@ -489,7 +490,7 @@
       const [cidrs, svcs, ti, hk, den, wif] = await Promise.all([API.cidrs(), API.services(), API.trusted(), API.honeykeys(), API.accessDenied(30), API.wifSettings().catch(() => null)]);
       if (st.page !== 'access') return;
       $('#cidrList').innerHTML = cidrs.map((c) => `<div class="row"><div class="row-ic sm ${c.label === 'VPN' ? 'ok' : ''}">${icon(c.label === 'VPN' ? 'lock' : 'globe')}</div><div class="row-b"><div class="row-t"><span class="mono">${esc(c.cidr)}</span></div><div class="row-s">${c.label === 'VPN' ? 'VPN' : '사내망'}</div></div><div class="row-e"><button class="icon-btn" data-dc="${c.id}" aria-label="삭제">${icon('trash')}</button></div></div>`).join('')
-        || `<div class="callout">${icon('alert')}<span>허용 대역이 없어서 모든 호출이 막혀요.</span></div>`;
+        || `<div class="callout">${icon('alert')}<span>허용 대역이 없어서 모든 IP를 허용하고 있어요.</span></div>`;
       $$('[data-dc]').forEach((b) => { b.onclick = async () => { try { await API.deleteCidr(b.dataset.dc); loadAccess(); } catch (e) { toast(e.message, 'bad'); } }; });
 
       $('#svcList').innerHTML = svcs.map((s) => `<div class="row" style="align-items:flex-start"><div class="row-ic ${s.status === 'ACTIVE' ? '' : 'gray'}">${icon('user')}</div>
@@ -502,13 +503,13 @@
 
       const svcName = (id) => (svcs.find((s) => s.id === id) || {}).name || `#${id}`;
       $('#tiList').innerHTML = ti.map((r) => `<div class="row"><div class="row-ic sm">${icon('id')}</div><div class="row-b"><div class="row-t"><span class="mono">${esc(r.subject_pattern)}</span></div><div class="row-s">${esc(r.issuer)} → ${esc(svcName(r.service_id))}</div></div><div class="row-e"><button class="icon-btn" data-dt="${r.id}" aria-label="삭제">${icon('trash')}</button></div></div>`).join('')
-        || `<div class="empty" style="padding:18px">${icon('id')}규칙이 없어요<br><span style="font-size:13px">데모 제어 → ‘WIF로 호출’이 데모 규칙을 만들어요</span></div>`;
+        || `<div class="empty" style="padding:18px">${icon('id')}규칙이 없어요<br><span style="font-size:13px">사내 ID 공급자의 신원을 서비스에 연결하면 여기에 나와요</span></div>`;
       $$('[data-dt]').forEach((b) => { b.onclick = async () => { try { await API.deleteTrusted(b.dataset.dt); loadAccess(); } catch (e) { toast(e.message, 'bad'); } }; });
       $('#wifAud').innerHTML = wif ? `기본 audience <b class="mono">${esc(wif.wif_audience)}</b> <button class="btn sm ghost" style="height:26px;padding:0 8px" id="wifEdit">바꾸기</button>` : '';
       if (wif) $('#wifEdit').onclick = () => wifAudienceSheet(wif.wif_audience);
 
       $('#hkList').innerHTML = hk.map((h) => `<div class="row"><div class="row-ic sm ${h.hits ? 'warn' : 'gray'}">${icon('honey')}</div><div class="row-b"><div class="row-t"><span class="mono">${esc(h.masked)}</span></div><div class="row-s">${esc(h.planted_at)}</div></div><div class="row-e">${h.hits ? `<span class="badge warn">${n(h.hits)}회 사용됨</span>` : '<span class="badge">조용함</span>'}</div></div>`).join('')
-        || `<div class="empty" style="padding:18px">허니키가 없어요. 데모 초기화를 해 보세요</div>`;
+        || `<div class="empty" style="padding:18px">허니키가 아직 없어요</div>`;
       const bl = st.dash ? st.dash.blocked_ips : [];
       $('#blockedIps').innerHTML = bl.length ? `<div class="callout" style="margin-top:14px">${icon('ban')}<span>임시 차단 중: ${bl.map((b) => `<b class="mono">${esc(b.source_ip)}</b> (${time(b.until, false)}까지)`).join(', ')}</span></div>` : '';
 
@@ -632,7 +633,7 @@
     let timer = null;
     const s = sheet({
       title: hk ? '허니키가 사용됐어요' : live ? '유출된 키를 자동으로 차단했어요' : `${esc(i.credential_masked)} 차단 기록`,
-      desc: hk ? '호출자에게는 평범한 401을 돌려주고, 안에서는 출발 IP를 10분간 막았어요.' : '게이트웨이가 모르는 호출이 차단선을 넘어 아래 순서로 대응했어요.',
+      desc: hk ? '호출자에게는 평범한 401을 돌려주고, 안에서는 전체 API 토큰을 폐기하고 서비스를 일시 정지했어요.' : '게이트웨이가 모르는 호출이 차단선을 넘어 아래 순서로 대응했어요.',
       body: `<div id="incBody">${incidentBody(i)}</div><div class="sheet-f"><button class="btn" data-close>확인</button></div>`,
       onMount(el) {
         // loss_calls 는 RESOLVED 뒤에도 한 번 더 바뀐다(Mock 폐기 2.5초 후, OpenRouter 28초 후 최종값) → 복구 후 40초까지 갱신
@@ -670,14 +671,14 @@
           <button class="ctl" id="dReset"><span class="row-ic sm">${icon('refresh')}</span><b>데모 초기화</b><span>키 3개·직원 2명·허니키를 새로 심어요</span></button>
           <button class="ctl" id="dAttack"><span class="row-ic sm bad">${icon('bolt')}</span><b id="dAttackT">공격 시작</b><span>유출 키로 공급자를 직접 초당 5회 호출</span></button>
           <button class="ctl" id="dOutside"><span class="row-ic sm gray">${icon('globe')}</span><b>외부 IP에서 호출</b><span>203.0.113.57 → 403을 받아요</span></button>
-          <button class="ctl" id="dHoney"><span class="row-ic sm warn">${icon('honey')}</span><b>허니키로 침입</b><span>가짜 토큰 사용 → IP 10분 차단</span></button>
+          <button class="ctl" id="dHoney"><span class="row-ic sm warn">${icon('honey')}</span><b>허니키로 침입</b><span>가짜 토큰 사용 → 전체 토큰 폐기·서비스 정지</span></button>
           <button class="ctl" id="dWif"><span class="row-ic sm">${icon('id')}</span><b>WIF로 호출</b><span>로컬 IdP JWT로 게이트웨이 인증</span></button>
           <button class="ctl" id="dSuspend"><span class="row-ic sm gray">${icon('pause')}</span><b>직원B 정지</b><span>정지된 서비스는 403</span></button>
         </div>
         <div class="ctl-row" style="margin-top:12px"><div class="row-ic">${icon('users')}</div><div class="row-b"><div class="row-t"><span>직원 정상 호출</span></div><div class="row-s" id="dTrafficS">직원A·B가 1.5초마다 게이트웨이로 호출해요</div></div><label class="switch"><input type="checkbox" id="dTraffic" ${st.traffic ? 'checked' : ''} aria-label="직원 정상 호출"><span></span></label></div>
         <div class="ctl-row"><div class="row-ic">${icon('plug')}</div><div class="row-b"><div class="row-t"><span>실제 공급자로 초기화</span></div><div class="row-s">게이트웨이 .env의 관리 키가 필요해요</div></div><div class="row-e"><button class="btn sm soft" data-rp="openrouter">OpenRouter</button><button class="btn sm soft" data-rp="openai">OpenAI</button></div></div>
-        <div class="ctl-row"><div class="row-ic gray">${icon('trash')}</div><div class="row-b"><div class="row-t"><span>발표 후 실제 키 정리</span></div><div class="row-s">november- 로 시작하는 키만 지워요</div></div><div class="row-e"><button class="btn sm gray" data-cl="openrouter">OpenRouter</button><button class="btn sm gray" data-cl="openai">OpenAI</button></div></div>
-        <div class="ctl-row"><div class="row-ic">${icon('external')}</div><div class="row-b"><div class="row-t"><span>발표 화면</span></div><div class="row-s">${live ? '링크에 서버 주소가 들어가요. 관리자 키는 들어가지 않아요' : '청중은 유출 키로, 직원은 게이트웨이로 채팅해요'}</div></div><div class="row-e"><button class="btn sm" id="dQr">청중 QR</button><a class="btn sm soft" href="${esc(API.shareLink('employee.html'))}" target="_blank" rel="noopener">직원</a></div></div>`,
+        <div class="ctl-row"><div class="row-ic gray">${icon('trash')}</div><div class="row-b"><div class="row-t"><span>시연 후 실제 키 정리</span></div><div class="row-s">november- 로 시작하는 키만 지워요</div></div><div class="row-e"><button class="btn sm gray" data-cl="openrouter">OpenRouter</button><button class="btn sm gray" data-cl="openai">OpenAI</button></div></div>
+        <div class="ctl-row"><div class="row-ic">${icon('external')}</div><div class="row-b"><div class="row-t"><span>발표 화면</span></div><div class="row-s">${live ? '링크에 서버 주소가 들어가요. 관리자 키는 들어가지 않아요' : '공격자는 유출 키로, 직원은 게이트웨이로 채팅해요'}</div></div><div class="row-e"><button class="btn sm" id="dQr">공격자 화면 QR</button><a class="btn sm soft" href="${esc(API.shareLink('employee.html'))}" target="_blank" rel="noopener">직원</a></div></div>`,
       onMount(el) {
         const sync = () => {
           const on = st.dash && st.dash.attack_running;
@@ -687,7 +688,7 @@
           $('#dAttack', el).classList.toggle('on', !!on);
           $('#dAttack', el).disabled = mockOnly;
           $('#dAttackT', el).textContent = on ? '공격 중지' : '공격 시작';
-          $('#dAttack span:last-child', el).textContent = mockOnly ? `Mock 모드 전용이에요. ${prov}는 청중 화면으로 시연하세요` : '유출 키로 공급자를 직접 초당 5회 호출';
+          $('#dAttack span:last-child', el).textContent = mockOnly ? `Mock 모드 전용이에요. ${prov}는 공격자 화면으로 시연하세요` : '유출 키로 공급자를 직접 초당 5회 호출';
         };
         sync();
         const iv = setInterval(sync, 800);
@@ -698,7 +699,7 @@
           await API.reset('mock'); resetLocal(); toast('초기화했어요. 새 토큰이 발급됐어요', 'ok');
           if (!st.traffic) setTraffic(true);
         });
-        $$('[data-rp]', el).forEach((b) => { b.onclick = run(b, async () => { if (!await confirmSheet({ title: `${b.dataset.rp}로 초기화할까요?`, desc: '기존 november- 키를 지우고 주/예비 키를 새로 만들어요.', ok: '초기화' })) return; toast('실제 키를 만드는 중이에요…'); const r = await API.reset(b.dataset.rp); resetLocal(); if (r.leaked_key) secretSheet('유출용 주 키를 만들었어요', '청중 화면이 이 키를 써요.', r.leaked_key); }); });
+        $$('[data-rp]', el).forEach((b) => { b.onclick = run(b, async () => { if (!await confirmSheet({ title: `${b.dataset.rp}로 초기화할까요?`, desc: '기존 november- 키를 지우고 주/예비 키를 새로 만들어요.', ok: '초기화' })) return; toast('실제 키를 만드는 중이에요…'); const r = await API.reset(b.dataset.rp); resetLocal(); if (r.leaked_key) secretSheet('유출용 주 키를 만들었어요', '공격자 화면이 이 키를 써요.', r.leaked_key); }); });
         $('#dAttack', el).onclick = run($('#dAttack', el), async () => {
           if (st.dash && st.dash.attack_running) { await API.attackStop(); toast('공격을 멈췄어요'); } else { await API.attackStart(); toast('공격을 시작했어요. 공급자 선만 올라가요', 'warn'); }
         });
@@ -707,7 +708,7 @@
           if (!tok) return toast('먼저 데모 초기화를 해 주세요', 'warn');
           try { await API.chat({ token: tok[1], message: '외부에서 접속', ip: '203.0.113.57' }); toast('통과했어요 (허용 대역을 확인하세요)', 'warn'); } catch (e) { toast(`${e.status} · ${e.message}`, 'bad'); }
         });
-        $('#dHoney', el).onclick = run($('#dHoney', el), async () => { const r = await API.honeypot(); toast(`${r.source_ip}에 ${r.status_code}을 돌려주고 IP를 막았어요`, 'warn'); });
+        $('#dHoney', el).onclick = run($('#dHoney', el), async () => { const r = await API.honeypot(); toast(`${r.source_ip}에 ${r.status_code}을 돌려주고 전체 토큰을 폐기했어요`, 'warn'); });
         $('#dWif', el).onclick = run($('#dWif', el), async () => {
           await API.wifSeed();
           const { token } = await API.wifToken();
@@ -730,7 +731,7 @@
     });
   }
 
-  // 청중 QR: 슬라이드·프로젝터에 띄워 폰으로 바로 접속하게 한다
+  // 공격자 화면 QR: 슬라이드·프로젝터에 띄워 폰으로 바로 접속하게 한다
   let qrLib = null;
   function loadQr() {
     qrLib ||= new Promise((ok, fail) => {
@@ -743,7 +744,7 @@
   }
   function qrSheet(url) {
     sheet({
-      title: '청중 채팅 QR', desc: API.mode === 'live' ? '폰 카메라로 찍으면 유출 키 채팅 화면이 열려요.' : '지금은 시뮬레이션이라 폰마다 따로 움직여요. 실서버에 연결하면 모두 같은 키를 써요.',
+      title: '공격자 화면 QR', desc: API.mode === 'live' ? '폰 카메라로 찍으면 유출 키 채팅 화면이 열려요.' : '지금은 시뮬레이션이라 폰마다 따로 움직여요. 실서버에 연결하면 모두 같은 유출 키를 써요.',
       body: `<div style="display:grid;place-items:center;padding:8px 0 4px"><div id="qrBox" style="background:#fff;padding:14px;border-radius:20px;width:min(300px,80vw);aspect-ratio:1;display:grid;place-items:center"><div class="skeleton" style="width:100%;height:100%"></div></div></div>
         <div class="secret-box" style="margin-top:14px"><span>${esc(url)}</span><button class="icon-btn" id="qrCopy" aria-label="링크 복사">${icon('copy')}</button></div>
         <div class="sheet-f"><a class="btn gray" href="${esc(url)}" target="_blank" rel="noopener">${icon('external')}열어 보기</a><button class="btn" data-close>닫기</button></div>`,
@@ -796,8 +797,8 @@
         <div class="callout ${API.mode === 'live' ? 'info' : ''}">${icon(API.mode === 'live' ? 'check' : 'plug')}<span>${API.mode === 'live' ? `지금 실서버(${esc(c.api)})에 연결돼 있어요.` : '지금은 브라우저 안 시뮬레이션이에요. 백엔드 없이도 같은 흐름을 보여 줘요.'}</span></div>
         <div class="inline-form" style="margin-bottom:16px"><button class="chip" data-pre="https://hack.sio2.kr|https://hack.sio2.kr">${icon('globe', 'width="14" height="14"')}테스트 서버 hack.sio2.kr</button><button class="chip" data-pre="http://localhost:8000|http://localhost:9000">${icon('plug', 'width="14" height="14"')}내 컴퓨터 (8000 · 9000)</button></div>
         <label class="field"><span>게이트웨이 주소</span><input class="input mono" id="cApi" value="${esc(c.api)}"></label>
-        <label class="field"><span>Mock Provider 주소 (청중 화면용)</span><input class="input mono" id="cMock" value="${esc(c.mock)}"></label>
-        <label class="field"><span>관리자 키 (X-Admin-Key)</span><input class="input mono" id="cKey" value="${esc(c.key)}" type="password" autocomplete="off"><small>테스트 서버 키는 담당자에게 따로 받아요. 이 브라우저에만 저장되고 청중 링크·QR에는 들어가지 않아요.</small></label>
+        <label class="field"><span>Mock Provider 주소 (공격자 화면용)</span><input class="input mono" id="cMock" value="${esc(c.mock)}"></label>
+        <label class="field"><span>관리자 키 (X-Admin-Key)</span><input class="input mono" id="cKey" value="${esc(c.key)}" type="password" autocomplete="off"><small>테스트 서버 키는 담당자에게 따로 받아요. 이 브라우저에만 저장되고 공격자 링크·QR에는 들어가지 않아요.</small></label>
         <div class="sheet-f"><button class="btn gray" data-close>취소</button><button class="btn" id="cGo">저장하고 다시 연결</button></div>`,
       onMount(el) {
         let mode = c.mode;

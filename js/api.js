@@ -59,7 +59,7 @@
   async function liveFetch(base, method, path, body, headers, timeoutMs) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs || 15000);
-    // 관리자 키는 관리·데모 경로에만. 청중 경로(/live/*)로는 보내지 않는다
+    // 관리자 키는 관리·데모 경로에만. 공격자 경로(/live/*)로는 보내지 않는다
     const admin = /^\/(admin|demo|idp|v1)\//.test(path) ? { 'X-Admin-Key': cfg.key } : {};
     let res;
     try {
@@ -170,7 +170,7 @@
       return r;
     },
     cleanup: (provider) => post(`/demo/cleanup-${provider}`, {}, { timeout: 60000 }),
-    // 청중·직원에게 줄 주소. 관리자 키는 절대 넣지 않는다
+    // 공격자·직원에게 줄 주소. 관리자 키는 절대 넣지 않는다
     shareLink(page) {
       const u = new URL(page, location.href);
       if (active === 'live') {
@@ -191,13 +191,13 @@
     },
 
     // 직원 호출: 게이트웨이 /v1/chat/completions (토큰 또는 WIF JWT)
-    chat: ({ token, message, ip, model = 'mock', max_tokens = 120 }) => post('/v1/chat/completions',
-      { model, max_tokens, messages: [{ role: 'user', content: message }] },
+    chat: ({ token, message, history = [], ip, model = 'mock', max_tokens = 120 }) => post('/v1/chat/completions',
+      { model, max_tokens, messages: [...history, { role: 'user', content: message }] },
       { headers: { Authorization: `Bearer ${token}`, ...(ip ? { 'X-Demo-Source-IP': ip } : {}) } }),
 
-    // 청중 라이브 (F절, Mock Provider)
+    // 공격자 라이브 (F절, Mock Provider)
     liveConfig: () => get('/live/config', { target: 'mock' }),
-    liveChat: (key, message) => post('/live/chat', { key, message }, { target: 'mock', timeout: 30000 }),
+    liveChat: (key, message, history = []) => post('/live/chat', { key, message, history }, { target: 'mock', timeout: 30000 }),
     liveStats: () => get('/live/stats', { target: 'mock' }),
     simWorld: () => (active === 'sim' ? sim() : null),
   };
